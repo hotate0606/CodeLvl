@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('codelvl', {
   getSlots:       () => ipcRenderer.invoke('get-slots'),
   updateSlots:    (n) => ipcRenderer.invoke('update-slots', n),
 
+  // 課金アイテム系
+  activateXpBoost: (ms) => ipcRenderer.invoke('activate-xp-boost', ms),
+  expandCoinPool:  () => ipcRenderer.invoke('expand-coin-pool'),
+
   // 定期decayをrendererに通知
   onDecayTick:    (cb) => ipcRenderer.on('decay-tick', (_, pet) => cb(pet)),
 });

@@ -538,7 +538,7 @@ let coins           = 30;
 let coinPoolStart   = Date.now();
 
 const COIN_UNIT_MS   = 10 * 60 * 1000;
-const COIN_MAX_UNITS = 3;
+let   coinPoolUnits  = 3;  // 最大ユニット数（拡張アイテムで最大5＝50分50コイン）
 const COINS_PER_UNIT = 10;
 const FOOD_COST      = 10;
 const FEED_HUNGER    = 15;
@@ -566,11 +566,12 @@ const DIALOGUE = {
     petUp:         ['なつき度アップ！', 'うれしいな〜♪', 'えへへ'],
     evolving:      ['✨ しんか ちゅう… ✨'],
     mutate:        ['…あれ？ いろが ちがう！', '✨ とつぜんへんい！ ✨', 'レアカラーだ！'],
-    // コミット量による機嫌変化
+    // コミット量による機嫌変化（xp: 獲得XP, boost: ブースト中か）
     hatch:         ['うまれたよ！', 'はじめまして〜！', 'よろしくね！'],
-    commitBig:     ['すごいっ！ たくさんかいた！', 'うれしいな〜！！', 'もっとかいて〜！'],
-    commitNormal:  ['+50 XP！ がんばったね', 'えらい！', 'コード、たのしい？'],
-    commitSmall:   ['もうちょっと かいてほしい…', 'すこしだけ？', 'つかれてる？'],
+    commitBig:     (xp, boost) => `+${xp} XP！${boost ? '🔥' : ''} すごいっ！`,
+    commitNormal:  (xp, boost) => `+${xp} XP！${boost ? '🔥' : ''} えらい！`,
+    commitSmall:   (xp, boost) => `+${xp} XP… もうちょっとかいて？`,
+    capReached:    ['きょうは もう じゅうぶん！', 'また あした がんばろう！'],
     badTouch:      ['そこは だめ！', 'やめてよ〜！', 'ぷんぷん！'],
     badTouchDone:  ['きょうは もう やだ'],
   },
@@ -690,7 +691,7 @@ function renderCoins() {
 
 // ---- 時間で貯まるコイン ----
 function availableUnits() {
-  return Math.floor(Math.min(Date.now() - coinPoolStart, COIN_UNIT_MS * COIN_MAX_UNITS) / COIN_UNIT_MS);
+  return Math.floor(Math.min(Date.now() - coinPoolStart, COIN_UNIT_MS * coinPoolUnits) / COIN_UNIT_MS);
 }
 
 function fmtTime(ms) {
@@ -699,11 +700,25 @@ function fmtTime(ms) {
 }
 
 const coinMeter = document.getElementById('coin-meter');
-const coinSegs  = Array.from(coinMeter.querySelectorAll('.cfill'));
 const coinCount = document.getElementById('coin-count');
+let   coinSegs  = [];
+
+// プールユニット数に合わせてバーのセグメントを作り直す
+function rebuildCoinSegments() {
+  coinMeter.innerHTML = '';
+  for (let i = 0; i < coinPoolUnits; i++) {
+    const seg  = document.createElement('div');
+    seg.className = 'cseg';
+    const fill = document.createElement('div');
+    fill.className = 'cfill';
+    seg.appendChild(fill);
+    coinMeter.appendChild(seg);
+  }
+  coinSegs = Array.from(coinMeter.querySelectorAll('.cfill'));
+}
 
 function updateCoinDisplay() {
-  const totalMax = COIN_UNIT_MS * COIN_MAX_UNITS;
+  const totalMax = COIN_UNIT_MS * coinPoolUnits;
   const elapsed  = Math.min(Date.now() - coinPoolStart, totalMax);
   const units    = availableUnits();
   const committed = todayStr() === lastCommitDate;
@@ -722,7 +737,7 @@ function claimCoins() {
   if (units < 1) { say('notReady'); return; }
   const gained = units * COINS_PER_UNIT;
   coins += gained;
-  const elapsed = Math.min(Date.now() - coinPoolStart, COIN_UNIT_MS * COIN_MAX_UNITS);
+  const elapsed = Math.min(Date.now() - coinPoolStart, COIN_UNIT_MS * coinPoolUnits);
   coinPoolStart = Date.now() - (elapsed - units * COIN_UNIT_MS);
   savePet();
   saveCoins(gained, 'claim');
@@ -804,7 +819,7 @@ function updateUI(stats) {
 
 if (window.codelvl) {
   window.codelvl.onUpdateStats(updateUI);
-  window.codelvl.onXpGained(({ reason, moodDelta }) => {
+  window.codelvl.onXpGained(({ reason, moodDelta, xp, capped, boosted }) => {
     // 卵状態なら孵化させてから処理
     if (!bornPalette) {
       hatch();
@@ -824,9 +839,12 @@ if (window.codelvl) {
     renderParams();
     updateCoinDisplay();
 
-    if (delta >= 8)      { triggerHappy(); say('commitBig'); }
-    else if (delta >= 0) { triggerHappy(); say('commitNormal'); }
-    else                 { say('commitSmall'); }
+    // キャップに当たったら専用セリフ
+    if (capped && xp === 0) {
+      say('capReached');
+    } else if (delta >= 8)   { triggerHappy(); say('commitBig',    xp, boosted); }
+    else if (delta >= 0)     { triggerHappy(); say('commitNormal', xp, boosted); }
+    else                     { say('commitSmall', xp, boosted); }
   });
   // mainプロセスからの定期decay通知
   window.codelvl.onDecayTick((pet) => {
@@ -854,12 +872,14 @@ if (window.codelvl) {
     lastBadPetDate    = pet.lastBadPetDate  ?? '';
     coinPoolStart     = pet.coinPoolStart   ?? Date.now();
     coins             = state.coins ?? 30;
+    coinPoolUnits     = state.coinPoolUnits ?? 3;
     updateUI(state);
   }
 
   // 卵状態のまま待機（孵化は最初のコミット時）
   updateActiveChar(); // bornPaletteがあればキャラを選択
 
+  rebuildCoinSegments(); // プールユニット数ぶんのバーを生成
   renderParams();
   renderCoins();
   updateCoinDisplay();
@@ -890,5 +910,16 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'b' || e.key === 'B') {
     // 触られたくない場所のテスト（強制ペナルティ発動）
     lastBadPetDate = ''; setStatus('（テスト）bad-touch リセット');
+  } else if (e.key === 'x' || e.key === 'X') {
+    // （テスト）XPブースト発動（1.5h）
+    window.codelvl?.activateXpBoost().then(() => setStatus('（テスト）XPブースト1.5h🔥'));
+  } else if (e.key === 'p' || e.key === 'P') {
+    // （テスト）コインプール拡張（+10分/+10コイン、最大5ユニット）
+    window.codelvl?.expandCoinPool().then((u) => {
+      coinPoolUnits = u;
+      rebuildCoinSegments();
+      updateCoinDisplay();
+      setStatus(`（テスト）プール拡張 → ${u}ユニット(${u * 10}分/${u * 10}🪙)`);
+    });
   }
 });

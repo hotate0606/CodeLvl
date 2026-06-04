@@ -6,7 +6,52 @@ const { execSync } = require('child_process');
 const DATA_PATH   = path.join(app.getPath('userData'), 'data.json');
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json');
 
-const XP_PER_COMMIT = 50;
+// ---- XP設計 ----
+const XP_BASE        = 10;   // コミット基本XP
+const XP_BONUS_MAX   = 40;   // コード量ボーナスの上限
+const XP_LINE_MIN    = 50;   // ボーナス発生の最小行数
+const XP_LINE_CAP    = 3000; // ボーナス頭打ちの行数
+const DAILY_XP_CAP   = 150;  // 1日のXP上限（荒稼ぎ防止）
+const XP_BOOST_MULT  = 1.5;  // 課金ブースト倍率（XP・キャップ両方）
+
+// コード変更量(churn)から獲得XPを算出
+// XP = 10 + floor( 40 × √((行数-50) / 2950) )  ※50行未満は+0、3000行で頭打ち
+function calcCommitXP(churn) {
+  if (churn < XP_LINE_MIN) return XP_BASE;
+  const capped = Math.min(churn, XP_LINE_CAP);
+  const ratio  = (capped - XP_LINE_MIN) / (XP_LINE_CAP - XP_LINE_MIN);
+  return XP_BASE + Math.floor(XP_BONUS_MAX * Math.sqrt(ratio));
+}
+
+// ---- レベル設計（指数：基準21 × 1.08^(Lv-1)）----
+// Lv50で報酬上限（累計約11,000）、51以降も無限に上がる
+const LV_BASE = 21;
+const LV_MULT = 1.08;
+
+// 累計XPからレベルを算出
+function calcLevel(xp) {
+  let level = 1;
+  let need  = LV_BASE;     // Lv1→2 に必要なXP
+  let acc   = 0;
+  while (xp >= acc + need) {
+    acc += need;
+    level++;
+    need = Math.round(LV_BASE * Math.pow(LV_MULT, level - 1));
+  }
+  return level;
+}
+
+// 指定レベルに到達するまでの累計XP
+function cumulativeXP(level) {
+  let acc = 0;
+  for (let n = 1; n < level; n++) acc += Math.round(LV_BASE * Math.pow(LV_MULT, n - 1));
+  return acc;
+}
+
+// そのレベルの「次のレベルまで必要なXP」
+function xpForNextLevel(level) {
+  return Math.round(LV_BASE * Math.pow(LV_MULT, level - 1));
+}
 
 // ---- ペットのデフォルト状態 ----
 function defaultPetState() {
@@ -57,16 +102,25 @@ function loadData() {
       pet:     defaultPetState(),
       coins:   30,
       coinLog: [],          // コイン収支ログ（直近200件まで保持）
-      slots:   1,           // キャラ枠（基本1、課金で最大5）
+      slots:   1,           // キャラ枠（基本1、Lv15で2、課金で最大5）
+      lastCommitChurn: 0,
+      dailyXp:     0,       // 今日コミットで稼いだXP（キャップ判定用）
+      dailyXpDate: '',      // dailyXpの対象日
+      xpBoostUntil: 0,      // XPブーストの終了時刻(ms)。0=未使用
+      coinPoolUnits: 3,     // コインプールの最大ユニット数（拡張アイテムで最大5）
     };
   }
   const data = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
   // 旧データとの互換：不足フィールドを補完
-  if (!data.pet)           data.pet           = defaultPetState();
-  if (data.coins    == null) data.coins       = 30;
-  if (!data.coinLog)         data.coinLog     = [];
-  if (!data.slots)           data.slots       = 1;
+  if (!data.pet)             data.pet             = defaultPetState();
+  if (data.coins    == null) data.coins           = 30;
+  if (!data.coinLog)         data.coinLog         = [];
+  if (!data.slots)           data.slots           = 1;
   if (data.lastCommitChurn == null) data.lastCommitChurn = 0;
+  if (data.dailyXp      == null) data.dailyXp      = 0;
+  if (data.dailyXpDate  == null) data.dailyXpDate  = '';
+  if (data.xpBoostUntil == null) data.xpBoostUntil = 0;
+  if (data.coinPoolUnits == null) data.coinPoolUnits = 3;
   // ペット状態の不足フィールドを補完
   const def = defaultPetState();
   for (const [k, v] of Object.entries(def)) {
@@ -90,8 +144,6 @@ function saveConfig(config) {
 
 // ---- ユーティリティ ----
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function calcLevel(xp)    { return Math.floor(Math.sqrt(xp / 50)) + 1; }
-function xpForNextLevel(level) { return 50 * level * level; }
 function todayString()    { return new Date().toISOString().slice(0, 10); }
 
 // ---- 時間経過でのパラメータ減少 ----
@@ -143,38 +195,59 @@ function tryNotif(key, body) {
   notifCooldown[key] = now;
 }
 
-function checkNotifications(pet, coins, coinPoolStart) {
+function checkNotifications(pet, coins, coinPoolStart, coinPoolUnits) {
   if (pet.hunger    < 25) tryNotif('hunger',    'おなかすいてるよ！ ごはんあげて🍖');
   if (pet.condition < 20) tryNotif('condition', 'げんきがなくなってきた… コードかこ！');
   if (pet.mood      < 20) tryNotif('mood',      'きげんわるいよ… ごはんあげて🍖');
-  // コインが満タン（30分経過）のとき
-  const COIN_FULL_MS = 30 * 60 * 1000;
+  // コインが満タン（最大ユニット×10分 経過）のとき
+  const COIN_FULL_MS = (coinPoolUnits ?? 3) * 10 * 60 * 1000;
   if (Date.now() - (coinPoolStart ?? 0) >= COIN_FULL_MS) {
     tryNotif('coinFull', 'コインが満タンだよ！ うけとってね🪙');
   }
 }
 
 // ---- XP付与 ----
-function awardXP(amount, reason, repoPath) {
+function awardXP(_amount, reason, repoPath) {
   const data  = loadData();
   const today = todayString();
+  const now   = Date.now();
 
   if (data.lastDate !== today) { data.todayCommits = 0; data.lastDate = today; }
-  data.xp           += amount;
-  data.totalCommits += 1;
-  data.todayCommits += 1;
+  // デイリーXPの日付が変わっていたらリセット
+  if (data.dailyXpDate !== today) { data.dailyXp = 0; data.dailyXpDate = today; }
 
-  // コミット量（churn）を取得して前回と比較 → 機嫌の変化量を算出
+  // コミット量（churn）を取得 → XPと機嫌変化を算出
   const churn     = repoPath ? getCommitChurn(repoPath) : 0;
   const moodDelta = calcMoodDelta(churn, data.lastCommitChurn ?? 0);
   data.lastCommitChurn = churn;
+
+  // 基本XPを算出
+  let gained = calcCommitXP(churn);
+
+  // ブースト中ならXP1.5倍＋デイリーキャップも1.5倍
+  const boosted = now < (data.xpBoostUntil ?? 0);
+  if (boosted) gained = Math.round(gained * XP_BOOST_MULT);
+  const cap = boosted ? Math.round(DAILY_XP_CAP * XP_BOOST_MULT) : DAILY_XP_CAP;
+
+  // デイリーキャップ適用：今日の残り枠ぶんだけ反映
+  const room      = Math.max(0, cap - data.dailyXp);
+  const actualXp  = Math.min(gained, room);
+  const capped    = actualXp < gained; // キャップに当たったか
+
+  data.xp           += actualXp;
+  data.dailyXp      += actualXp;
+  data.totalCommits += 1;
+  data.todayCommits += 1;
 
   saveData(data);
 
   const level = calcLevel(data.xp);
   if (overlayWindow) {
     overlayWindow.webContents.send('update-stats', { ...data, level, xpForNext: xpForNextLevel(level) });
-    overlayWindow.webContents.send('xp-gained', { amount, reason, moodDelta, churn });
+    overlayWindow.webContents.send('xp-gained', {
+      reason, moodDelta, churn,
+      xp: actualXp, capped, boosted,
+    });
   }
 }
 
@@ -294,7 +367,7 @@ app.whenReady().then(() => {
   // 起動時にdecay適用・通知チェック
   const data = applyDecay(loadData());
   saveData(data);
-  checkNotifications(data.pet, data.coins, data.pet.coinPoolStart);
+  checkNotifications(data.pet, data.coins, data.pet.coinPoolStart, data.coinPoolUnits);
 
   const level = calcLevel(data.xp);
   overlayWindow.webContents.on('did-finish-load', () => {
@@ -305,7 +378,7 @@ app.whenReady().then(() => {
   setInterval(() => {
     const d = applyDecay(loadData());
     saveData(d);
-    checkNotifications(d.pet, d.coins, d.pet.coinPoolStart);
+    checkNotifications(d.pet, d.coins, d.pet.coinPoolStart, d.coinPoolUnits);
     // decayの結果をrendererに反映
     if (overlayWindow) overlayWindow.webContents.send('decay-tick', d.pet);
   }, 10 * 60 * 1000);
@@ -357,6 +430,25 @@ ipcMain.handle('update-slots', (_, count) => {
   data.slots = clamp(count, 1, 5); // 最大5枠
   saveData(data);
   return data.slots;
+});
+
+// XPブースト発動（1.5h・XPとデイリーキャップ1.5倍）
+ipcMain.handle('activate-xp-boost', (_, durationMs = 90 * 60 * 1000) => {
+  const data = loadData();
+  const now  = Date.now();
+  // 残り時間がある場合は延長
+  const base = Math.max(now, data.xpBoostUntil ?? 0);
+  data.xpBoostUntil = base + durationMs;
+  saveData(data);
+  return data.xpBoostUntil;
+});
+
+// コインプール拡張（最大ユニットを+1、上限5＝50分50コイン）
+ipcMain.handle('expand-coin-pool', () => {
+  const data = loadData();
+  data.coinPoolUnits = clamp((data.coinPoolUnits ?? 3) + 1, 3, 5);
+  saveData(data);
+  return data.coinPoolUnits;
 });
 
 app.on('window-all-closed', (e) => e.preventDefault());
