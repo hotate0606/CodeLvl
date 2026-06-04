@@ -6,20 +6,58 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="overlay">
-    <div id="header">
-      <span id="level-badge">Lv.1</span>
-      <span id="title-text">CodeLv</span>
+  <div id="card">
+    <div id="left">
+      <div id="topbar">
+        <span id="level-badge">Lv.1</span>
+        <div id="coin-area">
+          <span id="coins">🪙 0</span>
+          <div id="coin-meter" title="コインプール（30分で満タン／クリックで受取）">
+            <div class="cseg"><div class="cfill"></div></div>
+            <div class="cseg"><div class="cfill"></div></div>
+            <div class="cseg"><div class="cfill"></div></div>
+          </div>
+          <span id="coin-count">30:00</span>
+        </div>
+      </div>
+      <div id="scene-wrap">
+        <canvas id="scene" width="320" height="256"></canvas>
+        <div id="speech"></div>
+      </div>
+      <button id="feed-btn">🍖 ごはんをあげる (10🪙)</button>
     </div>
-    <div id="xp-bar-container">
-      <div id="xp-bar"></div>
+
+    <div id="params">
+      <div class="ptitle">ステータス</div>
+
+      <div class="param" data-key="condition">
+        <div class="phead">
+          <span class="picon">⚡</span><span class="pname">じょうたい</span>
+        </div>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
+
+      <div class="param" data-key="affection">
+        <div class="phead">
+          <span class="picon">💖</span><span class="pname">なつき</span>
+        </div>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
+
+      <div class="param" data-key="hunger">
+        <div class="phead">
+          <span class="picon">🍖</span><span class="pname">くうふく</span>
+        </div>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
+
+      <div class="param" data-key="mood">
+        <div class="phead">
+          <span class="picon">🎵</span><span class="pname">きげん</span>
+        </div>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
     </div>
-    <div id="xp-text">0 / 50 XP</div>
-    <div id="stats-row">
-      <span id="commits-today">commits today: 0</span>
-      <span id="total-xp">total XP: 0</span>
-    </div>
-    <div id="xp-flash"></div>
   </div>
   <script src="renderer.js"></script>
 </body>
