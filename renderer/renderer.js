@@ -10,92 +10,116 @@ const view = document.getElementById('scene');
 const vctx = view.getContext('2d');
 vctx.imageSmoothingEnabled = false;
 
-// ---- 画像読み込み＋背景自動透過（共通関数）----
-// src を読み込み、フラッドフィルで背景を透過にしてcanvasを返すPromise
-function loadImageWithBgRemoval(src, { tol = 38, removeShadow = true, removeGold = false } = {}) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const w = img.naturalWidth, h = img.naturalHeight;
-      const tmp = document.createElement('canvas');
-      tmp.width = w; tmp.height = h;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const id = ctx.getImageData(0, 0, w, h);
-      const d  = id.data;
+// ===== ゲッコー スプライト（画像ダウンサンプル方式）=====
+const GECKO_DOT_W = 110;
+const DOT_SCALE   = 2;
 
-      // フラッドフィル共通関数
-      function floodFill(seedX, seedY, refR, refG, refB, tolerance) {
-        const vis = new Uint8Array(w * h);
-        const stk = [];
-        function push(x, y) {
-          if (x >= 0 && x < w && y >= 0 && y < h && !vis[y * w + x]) stk.push(x, y);
-        }
-        push(seedX, seedY);
-        while (stk.length) {
-          const fy = stk.pop(), fx = stk.pop();
-          if (vis[fy * w + fx]) continue;
-          vis[fy * w + fx] = 1;
-          const fi = (fy * w + fx) * 4;
-          if (d[fi + 3] === 0) continue;
-          const dr = d[fi] - refR, dg = d[fi+1] - refG, db = d[fi+2] - refB;
-          if (dr*dr + dg*dg + db*db < tolerance*tolerance) {
-            d[fi + 3] = 0;
-            push(fx-1,fy); push(fx+1,fy); push(fx,fy-1); push(fx,fy+1);
-          }
-        }
+function keepLargestComponent(d, w, h) {
+  const vis = new Uint8Array(w * h);
+  const components = [];
+  for (let sy = 0; sy < h; sy++) {
+    for (let sx = 0; sx < w; sx++) {
+      const idx = sy * w + sx;
+      if (vis[idx] || d[idx * 4 + 3] < 30) { vis[idx] = 1; continue; }
+      const pixels = [], stk = [idx];
+      while (stk.length) {
+        const p = stk.pop();
+        if (p < 0 || p >= w * h || vis[p]) continue;
+        vis[p] = 1;
+        if (d[p * 4 + 3] < 30) continue;
+        pixels.push(p);
+        const px = p % w, py = (p / w) | 0;
+        if (px > 0) stk.push(p-1); if (px < w-1) stk.push(p+1);
+        if (py > 0) stk.push(p-w); if (py < h-1) stk.push(p+w);
       }
-
-      // 1. 四辺から背景除去
-      const bgR = d[0], bgG = d[1], bgB = d[2];
-      for (let x = 0; x < w; x++) {
-        floodFill(x, 0,   bgR, bgG, bgB, tol);
-        floodFill(x, h-1, bgR, bgG, bgB, tol);
-      }
-      for (let y = 0; y < h; y++) {
-        floodFill(0,   y, bgR, bgG, bgB, tol);
-        floodFill(w-1, y, bgR, bgG, bgB, tol);
-      }
-
-      // 2. 金色キラキラ除去（卵専用オプション）
-      if (removeGold) {
-        for (let i = 0; i < d.length; i += 4) {
-          if (d[i+3] === 0) continue;
-          const r = d[i], g = d[i+1], b = d[i+2];
-          const maxC = Math.max(r,g,b), minC = Math.min(r,g,b);
-          const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
-          if (r === maxC && sat > 0.28 && maxC > 120) d[i+3] = 0;
-        }
-      }
-
-      // 3. 影ディスク除去（底部中央から2回目フラッドフィル）
-      if (removeShadow) {
-        for (let sy = h-1; sy >= Math.floor(h * 0.78); sy--) {
-          const si = (sy * w + Math.floor(w/2)) * 4;
-          if (d[si+3] > 0) {
-            floodFill(Math.floor(w/2), sy, d[si], d[si+1], d[si+2], 55);
-            break;
-          }
-        }
-      }
-
-      ctx.putImageData(id, 0, 0);
-      resolve(tmp);
-    };
-    img.src = src;
-  });
+      if (pixels.length > 0) components.push(pixels);
+    }
+  }
+  if (components.length === 0) return;
+  const largest = components.reduce((a, b) => a.length > b.length ? a : b);
+  const keep = new Uint8Array(w * h);
+  for (const p of largest) keep[p] = 1;
+  for (let p = 0; p < w * h; p++) if (!keep[p]) d[p * 4 + 3] = 0;
 }
 
-// ---- 卵・キャラ画像の読み込み ----
-let eggCanvas = null;
-loadImageWithBgRemoval('./assets/たまご.png', { tol: 38, removeGold: true, removeShadow: true })
-  .then(c => { eggCanvas = c; });
+function floodFillTransparent(d, w, h, seeds, tol) {
+  for (const [sx, sy] of seeds) {
+    const si = (sy * w + sx) * 4;
+    if (d[si + 3] === 0) continue;
+    const r = d[si], gg = d[si+1], b = d[si+2];
+    const vis = new Uint8Array(w * h);
+    const stk = [sx, sy];
+    while (stk.length) {
+      const y = stk.pop(), x = stk.pop();
+      if (x < 0 || x >= w || y < 0 || y >= h) continue;
+      const idx = y * w + x;
+      if (vis[idx]) continue;
+      vis[idx] = 1;
+      const i = idx * 4;
+      if (d[i+3] === 0) { stk.push(x-1,y, x+1,y, x,y-1, x,y+1); continue; }
+      const dr=d[i]-r, dg=d[i+1]-gg, db=d[i+2]-b;
+      if (dr*dr + dg*dg + db*db <= tol*tol) { d[i+3]=0; stk.push(x-1,y, x+1,y, x,y-1, x,y+1); }
+    }
+  }
+}
 
-// スプライト画像マップ: spriteImages['gecko']['green'][0] = canvas
-const spriteImages = { gecko: { green: [], blue: [], gold: [] } };
-loadImageWithBgRemoval('./assets/ニシアフリカトカゲモドキ1.png').then(c => { spriteImages.gecko.green[0] = c; });
-loadImageWithBgRemoval('./assets/ニシアフリカトカゲモドキ2.png').then(c => { spriteImages.gecko.blue[0]  = c; });
-loadImageWithBgRemoval('./assets/ニシアフリカトカゲモドキ3.png').then(c => { spriteImages.gecko.gold[0]  = c; });
+function makeDotSprite(img, crop, dotW, { bgTol = 70 } = {}) {
+  const cw = crop.x1-crop.x0, ch = crop.y1-crop.y0;
+  const full = document.createElement('canvas');
+  full.width = cw; full.height = ch;
+  const fc = full.getContext('2d');
+  fc.imageSmoothingEnabled = false;
+  fc.drawImage(img, crop.x0, crop.y0, cw, ch, 0, 0, cw, ch);
+  const fid = fc.getImageData(0, 0, cw, ch);
+  const fd  = fid.data;
+  floodFillTransparent(fd, cw, ch, [[0,0],[cw-1,0],[0,ch-1],[cw-1,ch-1]], bgTol);
+  keepLargestComponent(fd, cw, ch);
+  fc.putImageData(fid, 0, 0);
+  let minX=cw, minY=ch, maxX=-1, maxY=-1;
+  for (let y=0; y<ch; y++) for (let x=0; x<cw; x++) {
+    if (fd[(y*cw+x)*4+3] > 0) {
+      if (x<minX) minX=x; if (x>maxX) maxX=x;
+      if (y<minY) minY=y; if (y>maxY) maxY=y;
+    }
+  }
+  if (maxX < 0) return full;
+  const bw=maxX-minX+1, bh=maxY-minY+1;
+  const dotH = Math.max(1, Math.round(bh*dotW/bw));
+  const out = document.createElement('canvas');
+  out.width=dotW; out.height=dotH;
+  const oc = out.getContext('2d');
+  oc.imageSmoothingEnabled = true;
+  oc.imageSmoothingQuality = 'high';
+  oc.drawImage(full, minX, minY, bw, bh, 0, 0, dotW, dotH);
+  return out;
+}
+
+// idle はベースカラー3色（green/blue/gold）をパレット別に進化段階別で保持。
+const dotFrames = { gecko: { idle: { green: [], blue: [], gold: [] } } };
+
+function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
+  const img = new Image();
+  img.onload = () => {
+    const crop = { x0: 0, y0: 0, x1: img.naturalWidth, y1: img.naturalHeight };
+    target[index] = makeDotSprite(img, crop, dotW, { bgTol });
+  };
+  img.src = src;
+}
+
+// idle[pal] は進化段階で索引: [0]=ベビー, [1]=進化後
+// stage 0（ベビー）: 1→green, 2→blue, 3→gold（イラストsprite と同じ対応）
+loadDotSprite('./assets/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green);
+loadDotSprite('./assets/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue);
+loadDotSprite('./assets/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold);
+// stage 1（進化後）: 進化１→green, 進化２→blue, 進化３→gold（番号＝個体が一致）
+loadDotSprite('./assets/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1);
+loadDotSprite('./assets/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1);
+loadDotSprite('./assets/ニシアフリカトカゲモドキ進化３.png', dotFrames.gecko.idle.gold,  1);
+// 卵（孵化前）: ドット絵。eggDot[0]
+const eggDot = [];
+loadDotSprite('./assets/たまご１.png', eggDot);
+
+const EGG_DRAW_W = 76; // 卵の描画幅(px)。小さめに。大きさはここで調整
 
 // オフスクリーン（論理解像度）に描いてから拡大する
 const off = document.createElement('canvas');
@@ -106,6 +130,9 @@ const g = off.getContext('2d');
 const FLOOR_Y = 44; // 床の境界ライン（論理px）
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ===== エモート（あくび等）は廃止 =====
+// モーションは後日スプライト生成方式で付ける予定。
 
 // ---- 小物描画ヘルパ ----
 function px(x, y, w, h, color) {
@@ -222,63 +249,7 @@ function mutationStyle() {
   return mutationType ? MUTATION_STYLES[mutationType] : null;
 }
 
-// ---- キャラ（スライム系の生き物）----
-function drawCreature(cx, feetY, sx, sy, blink, smile, tint, stageOverride) {
-  const stages = activeStages();
-  const pal    = activePalette();
-  const stIdx  = stageOverride != null ? stageOverride : evolutionStage;
-  const st     = stages[Math.min(Math.max(stIdx, 0), stages.length - 1)];
-  const rxBase = 13 * st.scale, ryBase = 11 * st.scale;
-  const rx = rxBase * sx, ry = ryBase * sy;
-  const cy = feetY - ry;
-
-  const { body, hi, sh } = pal;
-
-  if (!tint) {
-    g.fillStyle = 'rgba(0,0,0,0.22)';
-    for (let x = -rx; x <= rx; x++) {
-      const w = Math.sqrt(Math.max(0, 1 - (x / rx) ** 2));
-      if (w > 0) g.fillRect((cx + x) | 0, (feetY + 1) | 0, 1, Math.max(1, (w * 2) | 0));
-    }
-  }
-
-  for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) {
-    for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++) {
-      const nx = (x - cx) / rx, ny = (y - cy) / ry;
-      if (nx * nx + ny * ny <= 1) {
-        let c = tint ? tint : (ny < -0.4 && Math.abs(nx) < 0.55 ? hi : ny > 0.5 ? sh : body);
-        g.fillStyle = c;
-        g.fillRect(x, y, 1, 1);
-      }
-    }
-  }
-
-  if (tint) return;
-
-  const eyeY = cy - ry * 0.05;
-  const eyeDX = rx * 0.42;
-  for (const dir of [-1, 1]) {
-    const ex = cx + dir * eyeDX;
-    if (blink) {
-      px(ex - 1, eyeY, 3, 1, '#1c2a22');
-    } else {
-      px(ex - 1, eyeY - 1, 2, 3, '#1c2a22');
-      px(ex - 1, eyeY - 1, 1, 1, '#ffffff');
-    }
-  }
-
-  px(cx - eyeDX - 2, eyeY + 2, 2, 1, 'rgba(255,140,160,0.55)');
-  px(cx + eyeDX + 1, eyeY + 2, 2, 1, 'rgba(255,140,160,0.55)');
-
-  const my = eyeY + 4;
-  if (smile) {
-    px(cx - 2, my, 1, 1, '#1c2a22');
-    px(cx - 1, my + 1, 3, 1, '#1c2a22');
-    px(cx + 2, my, 1, 1, '#1c2a22');
-  } else {
-    px(cx, my, 1, 1, '#1c2a22');
-  }
-}
+// ---- キャラ描画はドット絵（dotFrames）に一本化。旧スライムのコード描画は削除済み ----
 
 // ---- アニメーション状態 ----
 let lastBlink = 0, nextBlinkGap = 2.5, blinking = false, blinkEnd = 0;
@@ -291,29 +262,22 @@ const sparkles = [];
 const idleAnim = { nextTick: 0, tickEnd: 0, tickType: 0 };
 
 function getSpriteOffsets(now) {
-  // 呼吸：ゆっくり上下（約7秒周期）
-  const breathY = Math.sin(now * 0.85) * 2.5;
-
-  // 常時ごくわずかに揺れ（体重移動感）
+  // 縦ゆれ（呼吸の上下動・小ジャンプ）は廃止。じっと待機する。
+  // ごくわずかな傾きの揺れ（体重移動感）だけ残す。縦移動はしない。
   const microRot = Math.sin(now * 0.3) * 0.008;
 
-  // 時々発生するアクション（3〜8秒ごと）
-  let extraY = 0, actionRot = 0;
+  // 時々の小さなかしぎ（傾きのみ・縦移動なし、3〜8秒ごと）
+  let actionRot = 0;
   if (now > idleAnim.nextTick) {
     idleAnim.nextTick = now + 3 + Math.random() * 5;
     idleAnim.tickEnd  = now + 0.45;
-    idleAnim.tickType = Math.random() < 0.5 ? 1 : 2;
   }
   if (now < idleAnim.tickEnd) {
     const p = (idleAnim.tickEnd - now) / 0.45; // 1→0
-    if (idleAnim.tickType === 1) {
-      extraY     = -Math.sin(p * Math.PI) * 5;  // 小ジャンプ
-    } else {
-      actionRot  =  Math.sin(p * Math.PI) * 0.07; // かしぎ
-    }
+    actionRot = Math.sin(p * Math.PI) * 0.07; // かしぎ
   }
 
-  return { dy: breathY + extraY, rot: microRot + actionRot };
+  return { dy: 0, rot: microRot + actionRot };
 }
 
 const EVO_DUR = 3.0;
@@ -347,55 +311,32 @@ function renderEvolution(now, p) {
   g.fillStyle = `rgba(4,5,12,${dark})`;
   g.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
 
-  if (p < 0.18) {
-    const shake = Math.sin(now * 48) * (p / 0.18) * 1.4;
-    drawCreature(cx + shake, feetY, 1, 1, false, false, null, evolutionStage - 1);
-  } else if (p < 0.8) {
-    const fp = (p - 0.18) / 0.62;
-    const freq = 6 + fp * 34;
-    const pulse = 0.55 + 0.45 * Math.sin(now * freq);
-    const sc = 1 + 0.05 * Math.sin(now * freq);
-    drawCreature(cx, feetY, sc, sc, false, false, `rgba(255,255,255,${pulse})`);
+  // ※スライム（drawCreature）は描かない。光のエネルギー → 閃光 → 反映で演出する。
+  if (p < 0.8) {
+    // 変身エネルギー：足元中心に白い光球が徐々に強く脈動する
+    const fp    = clamp(p / 0.8, 0, 1);
+    const freq  = 6 + fp * 34;
+    const pulse = (0.25 + 0.55 * fp) * (0.55 + 0.45 * Math.sin(now * freq));
+    const r     = 8 + fp * 6 + Math.sin(now * freq) * 1.5;
+    g.save();
+    g.globalAlpha = clamp(pulse, 0, 1);
+    g.fillStyle = '#ffffff';
+    g.beginPath();
+    g.arc(cx, feetY - 11, r, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
   } else if (p < 0.9) {
+    // 閃光＋きらめき
     if (!evoBurstDone) { spawnSparkles(); evoBurstDone = true; }
     const fa = 1 - Math.abs((p - 0.85) / 0.05);
     g.fillStyle = `rgba(255,255,255,${clamp(fa, 0, 1)})`;
     g.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
   } else {
-    drawCreature(cx, feetY, 1, 1, false, true);
+    // 進化完了：ハートを出す（新しい姿は演出終了後にドット絵で表示）
     if (hearts.length < 2) {
       hearts.push({ x: cx + (Math.random() * 16 - 8), y: 28, vy: 8, vx: Math.random() * 3 - 1.5, life: 1.4 });
     }
   }
-}
-
-// 宝石を描く（cx,cy中心、rサイズ、colorカラー）
-function drawGem(ctx, cx, cy, r, color, now) {
-  ctx.save();
-  ctx.translate(cx, cy);
-  // 後光
-  ctx.shadowColor = color;
-  ctx.shadowBlur  = 10;
-  // ダイヤ型
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(0, -r);
-  ctx.lineTo(r * 0.8, -r * 0.2);
-  ctx.lineTo(0, r);
-  ctx.lineTo(-r * 0.8, -r * 0.2);
-  ctx.closePath();
-  ctx.fill();
-  // ハイライト（きらめき）
-  ctx.shadowBlur = 0;
-  const tw = 0.5 + 0.5 * Math.sin(now * 5);
-  ctx.fillStyle = `rgba(255,255,255,${0.5 + 0.5 * tw})`;
-  ctx.beginPath();
-  ctx.moveTo(-r * 0.25, -r * 0.45);
-  ctx.lineTo(0, -r * 0.1);
-  ctx.lineTo(-r * 0.4, -r * 0.05);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
 }
 
 // ---- メインループ ----
@@ -415,34 +356,6 @@ function frame() {
     const p = clamp((now - evoStart) / EVO_DUR, 0, 1);
     renderEvolution(now, p);
     if (p >= 1) evoActive = false;
-  } else {
-    const happy = now < happyEnd;
-    let sx = 1 + 0.03 * Math.sin(now * 2.2);
-    let sy = 1 - 0.03 * Math.sin(now * 2.2);
-    let feetY = FLOOR_Y + 7;
-    let cx    = 40;
-
-    if (happy) {
-      const p = 1 - (happyEnd - now) / 1.2;
-      feetY -= Math.abs(Math.sin(p * Math.PI * 2)) * 8;
-      const stretch = 0.1 * Math.sin(p * Math.PI * 2);
-      sx = 1 - stretch; sy = 1 + stretch;
-    }
-
-    // ぶるぶる（触られたくない場所）
-    if (now < badEnd) {
-      const p = (badEnd - now) / 0.6;
-      cx += Math.sin(now * 42) * p * 2.5;
-    }
-
-    // スプライト画像がなければコード描画（ある場合はブリット後に描く）
-    const pal      = currentPaletteName();
-    const stageImg = spriteImages[activeCharData().sprite]?.[pal]?.[evolutionStage];
-    if (!stageImg) {
-      drawCreature(cx, feetY, sx, sy, blinking, happy);
-    }
-    // stageImg がある場合の描画パラメータを保存（ブリット後に使う）
-    frame._sprite = stageImg ? { stageImg, sx, sy } : null;
   }
 
   for (let i = hearts.length - 1; i >= 0; i--) {
@@ -464,112 +377,47 @@ function frame() {
   vctx.clearRect(0, 0, view.width, view.height);
   vctx.drawImage(off, 0, 0, LOGICAL_W, LOGICAL_H, 0, 0, view.width, view.height);
 
-  // スプライト画像キャラ描画（ブリット後なので消えない）
-  if (frame._sprite) {
-    const { stageImg } = frame._sprite;
-    const st    = activeStages()[Math.min(evolutionStage, activeStages().length - 1)];
-    const base  = 120 * st.scale;
-    const pivX  = view.width / 2;
-    const pivY  = (FLOOR_Y + 8) * SCALE;
-    const off   = getSpriteOffsets(now);
-
-    // 影（かしぎに合わせて少しズレる）
-    const shadowX = pivX + Math.sin(off.rot) * base * 0.25;
-    vctx.save();
-    vctx.globalAlpha = 0.2;
-    vctx.fillStyle = '#1a1025';
-    vctx.beginPath();
-    vctx.ellipse(shadowX, pivY + 3, base * 0.42, 5, 0, 0, Math.PI * 2);
-    vctx.fill();
-    vctx.restore();
-
-    // キャラ本体（足元を軸に呼吸・かしぎ・ジャンプ）＋突然変異エフェクト
-    const ms = mutationStyle();
-    vctx.save();
-    vctx.imageSmoothingEnabled = true;
-    vctx.imageSmoothingQuality = 'high';
-    vctx.translate(pivX, pivY + off.dy);
-    vctx.rotate(off.rot);
-
-    // 発光：脈動するグロー（影として後光）
-    if (mutationType === 'glow' && ms) {
-      vctx.shadowColor = ms.color;
-      vctx.shadowBlur  = 16 + Math.sin(now * 4) * 8;
+  // キャラ／卵の描画（ドット絵）。進化演出中はキャラを出さず演出に任せる。
+  if (!evoActive) {
+    const pal = currentPaletteName(); // green / blue / gold
+    // 現在のキャラの画像（進化段階別）を表示。モーションは後日スプライト生成方式で対応予定。
+    const frames = dotFrames.gecko.idle[pal];
+    // 進化段階で画像を切替（[0]=ベビー, [1]=進化後）。未制作の段階は直近の画像にフォールバック。
+    let idx = 0;
+    if (frames) {
+      idx = Math.min(evolutionStage, frames.length - 1);
+      while (idx > 0 && !frames[idx]) idx--;
     }
-    // プラチナ：金属フィルタで質感変更
-    if (mutationType === 'platinum' && ms) {
-      vctx.filter = ms.filter;
-    }
-    vctx.drawImage(stageImg, -base / 2, -base, base, base);
-    vctx.filter = 'none';
-    vctx.shadowBlur = 0;
-
-    // 宝石：頭上に宝石をひとつ乗せる（位置はデザイン確定後に調整）
-    if (mutationType === 'jewel' && ms) {
-      drawGem(vctx, 0, -base * 0.92, base * 0.11, ms.color, now);
-    }
-    vctx.restore();
-  }
-
-  // 卵状態（初コミット前）: 背景透過済みeggCanvasを描画
-  if (!bornPalette && eggCanvas) {
-    const eW = 108, eH = 116;
-    const pivotX = view.width / 2;           // 回転の軸X（底面中央）
-    const pivotY = (FLOOR_Y + 8) * SCALE;    // 回転の軸Y（床面）
-    const wobble = Math.sin(now * 1.6) * 0.04;
-
-    // 影：傾きに合わせてX方向にズレる（傾いた分だけ重心が移動する感じ）
-    const shadowShift = Math.sin(wobble) * eH * 0.28;
-    vctx.save();
-    vctx.globalAlpha = 0.22;
-    vctx.fillStyle = '#1a1025';
-    vctx.beginPath();
-    vctx.ellipse(pivotX + shadowShift, pivotY + 4, eW * 0.32, 5, 0, 0, Math.PI * 2);
-    vctx.fill();
-    vctx.restore();
-
-    // 卵本体：底面を軸に左右に揺れる
-    vctx.save();
-    vctx.imageSmoothingEnabled = true;
-    vctx.imageSmoothingQuality = 'high';
-    vctx.translate(pivotX, pivotY);
-    vctx.rotate(wobble);
-    vctx.drawImage(eggCanvas, -eW / 2, -eH, eW, eH);
-    vctx.restore();
-
-    // キラキラ：画像のきらめき位置に合わせて上下点滅
-    // dx/dy は pivotX/Y からのオフセット（画像内のキラキラ位置に対応）
-    const sparkDefs = [
-      { dx: -eW * 0.60, dy: -eH * 0.84, size: 9,  phase: 0.0  },
-      { dx:  eW * 0.50, dy: -eH * 0.68, size: 6,  phase: 1.4  },
-      { dx: -eW * 0.68, dy: -eH * 0.24, size: 6,  phase: 2.8  },
-    ];
-
-    for (const sp of sparkDefs) {
-      const pulse  = 0.5 + 0.5 * Math.sin(now * 3.5 + sp.phase);  // 0→1→0
-      const bobY   = Math.sin(now * 2.2 + sp.phase) * 3;           // 上下に揺れる
-      const sz     = sp.size * (0.6 + 0.4 * pulse);
-      const alpha  = 0.3 + 0.7 * pulse;
-
-      const sx = pivotX + sp.dx;
-      const sy = pivotY + sp.dy + bobY;
-
+    // 孵化前（bornPalette未設定）は卵を表示。孵化後はキャラ（進化段階別）を表示。
+    const isEgg  = !bornPalette;
+    const dotImg = isEgg
+      ? eggDot[0]
+      : ((frames && frames[idx]) || dotFrames.gecko.idle.gold[0]);
+    if (dotImg) {
+      // 描画サイズ（アスペクト比は維持）。キャラ: 120 * st.scale ／ 卵: EGG_DRAW_W（小さめ）。
+      const st    = activeStages()[Math.min(evolutionStage, activeStages().length - 1)];
+      const baseW = isEgg ? EGG_DRAW_W : 120 * st.scale;
+      const scale = baseW / dotImg.width;
+      const dW   = dotImg.width  * scale;
+      const dH   = dotImg.height * scale;
+      const pivX = view.width / 2;
+      const pivY = (FLOOR_Y + 8) * SCALE;
+      const offs = getSpriteOffsets(now);
       vctx.save();
-      vctx.globalAlpha = alpha;
-      vctx.fillStyle = '#ffd24a';
-      vctx.shadowColor = '#ffe27a';
-      vctx.shadowBlur = sz * 1.5;
-      // 4点の星を描く
+      vctx.globalAlpha = 0.2;
+      vctx.fillStyle = '#1a1025';
       vctx.beginPath();
-      for (let i = 0; i < 8; i++) {
-        const angle = (i * Math.PI) / 4 - Math.PI / 2;
-        const r = i % 2 === 0 ? sz : sz * 0.28;
-        const px = sx + Math.cos(angle) * r;
-        const py = sy + Math.sin(angle) * r;
-        i === 0 ? vctx.moveTo(px, py) : vctx.lineTo(px, py);
-      }
-      vctx.closePath();
+      vctx.ellipse(pivX, pivY + 3, dW * 0.4, 5, 0, 0, Math.PI * 2);
       vctx.fill();
+      vctx.restore();
+      vctx.save();
+      // キャラ/卵は縮小＋微回転するため、最近傍だと走査線状のちらつき
+      // （昔のビデオのような縦横線）が出る。高品質補間で滑らかにする。
+      vctx.imageSmoothingEnabled = true;
+      vctx.imageSmoothingQuality = 'high';
+      vctx.translate(pivX, pivY + offs.dy);
+      vctx.rotate(offs.rot * 0.5);
+      vctx.drawImage(dotImg, -dW / 2, -dH, dW, dH);
       vctx.restore();
     }
   }
@@ -583,6 +431,7 @@ requestAnimationFrame(frame);
 const params = { condition: 80, affection: 60, hunger: 70, mood: 80 };
 
 const PET_GAIN    = 20 / 3;
+const EGG_AFFECTION_PER_COMMIT = 100 / 3; // 卵はコミット約3回でなつき度MAX→孵化
 const MUTATION_RATE = 0.03;
 const HATCH_COLORS  = ['green', 'blue', 'gold'];
 
@@ -669,15 +518,6 @@ function updateActiveChar() {
 function activeCharData()    { return CHARACTERS[activeChar]; }
 function activeStages()      { return SPRITES[activeCharData().sprite].stages; }
 function currentPaletteName(){ return bornPalette || activeCharData().palette; }
-function activePalette() {
-  const base = getPalette(currentPaletteName());
-  // プラチナ変異はコード描画キャラの色も差し替え（画像キャラはフィルタで表現）
-  if (mutationType === 'platinum') {
-    const c = mutationStyle().color;
-    return { body: c, hi: '#ffffff', sh: c };
-  }
-  return base;
-}
 
 function say(event, ...args) {
   const set  = DIALOGUE[activeCharData().personality];
@@ -734,6 +574,24 @@ function evolve() {
   evoStart      = performance.now() / 1000;
   evoBurstDone  = false;
   say('evolving');
+}
+
+// なつき度MAXで次の段階へ進める：
+//   卵（bornPalette未設定）→ ベビー誕生
+//   ベビー / 各形態        → 進化（evolve内で演出＆なつき度リセット）
+// 進めたら true を返す。
+function tryAdvanceStage() {
+  if (params.affection < 100) return false;
+  if (!bornPalette) {
+    hatch();                 // 卵 → ベビー誕生
+    params.affection = 0;    // 次の段階（進化）に向けてリセット
+    triggerHappy();
+    say(mutationType ? 'mutate' : 'hatch');
+  } else {
+    evolve();                // ベビー → 進化後
+  }
+  savePet();
+  return true;
 }
 
 // ---- UI 更新 ----
@@ -868,10 +726,9 @@ view.addEventListener('click', (e) => {
   } else if (today === lastPetDate) {
     say('alreadyPet');
   } else {
-    params.affection += PET_GAIN;
+    params.affection = clamp(params.affection + PET_GAIN, 0, 100);
     lastPetDate = today;
-    if (params.affection >= 100) evolve();
-    else say('petUp');
+    if (!tryAdvanceStage()) say('petUp'); // MAXなら 卵→ベビー / ベビー→進化
   }
   savePet();
   renderParams();
@@ -885,11 +742,10 @@ function updateUI(stats) {
 if (window.codelvl) {
   window.codelvl.onUpdateStats(updateUI);
   window.codelvl.onXpGained(({ reason, moodDelta, xp, capped, boosted }) => {
-    // 卵状態なら孵化させてから処理
+    // 卵状態：コミットでなつき度を獲得し、MAXになったら孵化（即孵化はしない）
     if (!bornPalette) {
-      hatch();
-      triggerHappy();
-      say(mutationType ? 'mutate' : 'hatch'); // 変異して生まれたら専用セリフ
+      params.affection = clamp(params.affection + EGG_AFFECTION_PER_COMMIT, 0, 100);
+      tryAdvanceStage(); // MAXならベビー誕生（hatch内でセリフ）
       savePet();
       renderParams();
       updateCoinDisplay();
@@ -1036,6 +892,20 @@ document.getElementById('box-btn').addEventListener('click', () => {
 document.getElementById('box-close').addEventListener('click', () => {
   boxModal.classList.add('hidden');
 });
+
+// 進化形態リセット：卵の状態に戻して 卵→ベビー→進化 を最初から確認する
+document.getElementById('reset-evo-btn').addEventListener('click', () => {
+  bornPalette = null;
+  mutationType = null;
+  evolutionStage = 0;
+  evoActive = false;            // 進化演出が走っていたら止める
+  params.affection = 0;         // なつきも戻して再度の進化テストをしやすく
+  updateActiveChar();
+  savePet();
+  renderParams();
+  updateCoinDisplay();
+  setStatus('卵にもどしました（コミットで孵化します）');
+});
 document.querySelectorAll('#itembox-tabs .tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('#itembox-tabs .tab').forEach((t) => t.classList.remove('active'));
@@ -1048,14 +918,15 @@ document.querySelectorAll('#itembox-tabs .tab').forEach((tab) => {
 // ---- ⚠ テスト用ショートカット（確認後は消す）----
 window.addEventListener('keydown', (e) => {
   if (e.key === 'a' || e.key === 'A') {
-    params.affection += 20; triggerHappy();
-    if (params.affection >= 100) evolve(); else renderParams();
-    savePet();
+    params.affection = clamp(params.affection + 20, 0, 100); triggerHappy();
+    tryAdvanceStage(); // MAXなら 卵→ベビー / ベビー→進化
+    renderParams(); savePet();
   } else if (e.key === 'c' || e.key === 'C') {
     lastCommitDate = todayStr();
     params.condition = clamp(params.condition + 10, 0, 100);
     if (!bornPalette) {
-      hatch(); triggerHappy(); say(mutationType ? 'mutate' : 'hatch');
+      params.affection = clamp(params.affection + EGG_AFFECTION_PER_COMMIT, 0, 100);
+      tryAdvanceStage(); // コミット約3回でなつき度MAX→孵化
     }
     savePet(); renderParams(); updateCoinDisplay(); setStatus('（テスト）コミット済み');
   } else if (e.key === 't' || e.key === 'T') {
@@ -1071,6 +942,15 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'b' || e.key === 'B') {
     // 触られたくない場所のテスト（強制ペナルティ発動）
     lastBadPetDate = ''; setStatus('（テスト）bad-touch リセット');
+  } else if (e.key === 'v' || e.key === 'V') {
+    // （テスト）ベースカラー3色を順に切り替え（green→blue→gold）
+    const order = ['green', 'blue', 'gold'];
+    const cur   = currentPaletteName();
+    bornPalette = order[(order.indexOf(cur) + 1) % order.length];
+    mutationType = null;
+    updateActiveChar();
+    savePet();
+    setStatus(`（テスト）カラー: ${bornPalette}`);
   } else if (e.key === 'i' || e.key === 'I') {
     // （テスト）ランダムなアイテムをボックスに付与
     const ids = Object.keys(ITEM_CATALOG);

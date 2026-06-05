@@ -244,7 +244,7 @@ function awardXP(_amount, reason, repoPath) {
   saveData(data);
 
   const level = calcLevel(data.xp);
-  if (overlayWindow) {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send('update-stats', { ...data, level, xpForNext: xpForNextLevel(level) });
     overlayWindow.webContents.send('xp-gained', {
       reason, moodDelta, churn,
@@ -373,7 +373,9 @@ app.whenReady().then(() => {
 
   const level = calcLevel(data.xp);
   overlayWindow.webContents.on('did-finish-load', () => {
-    overlayWindow.webContents.send('update-stats', { ...data, level, xpForNext: xpForNextLevel(level) });
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send('update-stats', { ...data, level, xpForNext: xpForNextLevel(level) });
+    }
   });
 
   // 10分ごとにdecay適用・通知チェック
@@ -382,7 +384,7 @@ app.whenReady().then(() => {
     saveData(d);
     checkNotifications(d.pet, d.coins, d.pet.coinPoolStart, d.coinPoolUnits);
     // decayの結果をrendererに反映
-    if (overlayWindow) overlayWindow.webContents.send('decay-tick', d.pet);
+    if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.webContents.send('decay-tick', d.pet);
   }, 10 * 60 * 1000);
 });
 
