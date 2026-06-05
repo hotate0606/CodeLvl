@@ -61,7 +61,7 @@ function defaultPetState() {
     hunger:         70,
     mood:           80,
     evolutionStage: 0,
-    mutationPalette: null,
+    mutationType:    null,  // 'platinum' | 'glow' | 'jewel' | null
     bornPalette:    null,
     lastPetDate:    '',
     lastCommitDate: '',
@@ -108,6 +108,7 @@ function loadData() {
       dailyXpDate: '',      // dailyXpの対象日
       xpBoostUntil: 0,      // XPブーストの終了時刻(ms)。0=未使用
       coinPoolUnits: 3,     // コインプールの最大ユニット数（拡張アイテムで最大5）
+      inventory: [],        // アイテムボックス [{ id, qty }]（ダブりはqtyでスタック）
     };
   }
   const data = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
@@ -121,6 +122,7 @@ function loadData() {
   if (data.dailyXpDate  == null) data.dailyXpDate  = '';
   if (data.xpBoostUntil == null) data.xpBoostUntil = 0;
   if (data.coinPoolUnits == null) data.coinPoolUnits = 3;
+  if (!data.inventory)           data.inventory     = [];
   // ペット状態の不足フィールドを補完
   const def = defaultPetState();
   for (const [k, v] of Object.entries(def)) {
@@ -449,6 +451,32 @@ ipcMain.handle('expand-coin-pool', () => {
   data.coinPoolUnits = clamp((data.coinPoolUnits ?? 3) + 1, 3, 5);
   saveData(data);
   return data.coinPoolUnits;
+});
+
+// ---- アイテムボックス ----
+ipcMain.handle('get-inventory', () => loadData().inventory ?? []);
+
+// アイテム追加（同一idはqtyでスタック）
+ipcMain.handle('add-item', (_, { id, qty = 1 }) => {
+  const data = loadData();
+  data.inventory = data.inventory ?? [];
+  const ex = data.inventory.find((i) => i.id === id);
+  if (ex) ex.qty += qty;
+  else data.inventory.push({ id, qty });
+  saveData(data);
+  return data.inventory;
+});
+
+// アイテム消費（qty減算、0以下で除去）
+ipcMain.handle('remove-item', (_, { id, qty = 1 }) => {
+  const data = loadData();
+  const ex = (data.inventory ?? []).find((i) => i.id === id);
+  if (ex) {
+    ex.qty -= qty;
+    if (ex.qty <= 0) data.inventory = data.inventory.filter((i) => i.id !== id);
+  }
+  saveData(data);
+  return data.inventory;
 });
 
 app.on('window-all-closed', (e) => e.preventDefault());

@@ -190,31 +190,42 @@ const PALETTES = {
   shadow: { body: '#5a5470', hi: '#8a82a8', sh: '#3a3550' },
 };
 
-const RARE_PALETTES = {
-  ruby:     { body: '#e0436b', hi: '#ff9bb6', sh: '#a01f44' },
-  amethyst: { body: '#a05be0', hi: '#d8a8ff', sh: '#6a2fae' },
-  emerald:  { body: '#2fc98a', hi: '#9bffcf', sh: '#1a8a5a' },
-  sapphire: { body: '#3f7af0', hi: '#a8c8ff', sh: '#2348b0' },
-  platinum: { body: '#dfe6f0', hi: '#ffffff', sh: '#9aa6bc' },
-  rainbow:  { shimmer: true },
+function getPalette(name) { return PALETTES[name] || PALETTES.green; }
+
+// ===== 突然変異（3%）：プラチナ / 発光 / 宝石 の3タイプ × 各3変種 =====
+// レア度：プラチナ(49%) ＜ 発光(34%) ＜ 宝石(17%)
+const MUTATION_TABLE = [
+  { type: 'platinum', weight: 49 },
+  { type: 'glow',     weight: 34 },
+  { type: 'jewel',    weight: 17 },
+];
+
+const MUTATION_STYLES = {
+  platinum: { label: 'プラチナ', filter: 'grayscale(1) brightness(1.35) contrast(1.05)', color: '#dfe6f0' },
+  glow:     { label: '発光',     color: '#ffd24a' }, // 金色の後光
+  jewel:    { label: '宝石',     color: '#9ad8ff' }, // 頭上にダイヤ
 };
 
-function getPalette(name) { return PALETTES[name] || RARE_PALETTES[name]; }
+// 重み付き抽選で type を返す（プラチナ49 / 発光34 / 宝石17）
+function rollMutation() {
+  const total = MUTATION_TABLE.reduce((s, t) => s + t.weight, 0);
+  let r = Math.random() * total;
+  for (const t of MUTATION_TABLE) {
+    if (r < t.weight) return t.type;
+    r -= t.weight;
+  }
+  return 'platinum';
+}
 
-function shimmerColors(t) {
-  const h = (t * 70) % 360;
-  return {
-    body: `hsl(${h}, 80%, 64%)`,
-    hi:   `hsl(${(h + 25) % 360}, 88%, 80%)`,
-    sh:   `hsl(${h}, 68%, 46%)`,
-  };
+// 現在の変異スタイル（変異してなければ null）
+function mutationStyle() {
+  return mutationType ? MUTATION_STYLES[mutationType] : null;
 }
 
 // ---- キャラ（スライム系の生き物）----
 function drawCreature(cx, feetY, sx, sy, blink, smile, tint, stageOverride) {
   const stages = activeStages();
-  const palRaw = activePalette();
-  const pal    = palRaw.shimmer ? shimmerColors(performance.now() / 1000) : palRaw;
+  const pal    = activePalette();
   const stIdx  = stageOverride != null ? stageOverride : evolutionStage;
   const st     = stages[Math.min(Math.max(stIdx, 0), stages.length - 1)];
   const rxBase = 13 * st.scale, ryBase = 11 * st.scale;
@@ -306,7 +317,7 @@ function getSpriteOffsets(now) {
 }
 
 const EVO_DUR = 3.0;
-let evoActive = false, evoStart = 0, evoBurstDone = false, evoMutated = false;
+let evoActive = false, evoStart = 0, evoBurstDone = false;
 
 function triggerHappy() {
   happyEnd = performance.now() / 1000 + 1.2;
@@ -358,6 +369,35 @@ function renderEvolution(now, p) {
   }
 }
 
+// 宝石を描く（cx,cy中心、rサイズ、colorカラー）
+function drawGem(ctx, cx, cy, r, color, now) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  // 後光
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = 10;
+  // ダイヤ型
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.lineTo(r * 0.8, -r * 0.2);
+  ctx.lineTo(0, r);
+  ctx.lineTo(-r * 0.8, -r * 0.2);
+  ctx.closePath();
+  ctx.fill();
+  // ハイライト（きらめき）
+  ctx.shadowBlur = 0;
+  const tw = 0.5 + 0.5 * Math.sin(now * 5);
+  ctx.fillStyle = `rgba(255,255,255,${0.5 + 0.5 * tw})`;
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.25, -r * 0.45);
+  ctx.lineTo(0, -r * 0.1);
+  ctx.lineTo(-r * 0.4, -r * 0.05);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 // ---- メインループ ----
 let prev = performance.now() / 1000;
 
@@ -374,7 +414,7 @@ function frame() {
   if (evoActive) {
     const p = clamp((now - evoStart) / EVO_DUR, 0, 1);
     renderEvolution(now, p);
-    if (p >= 1) { evoActive = false; if (evoMutated) { say('mutate'); evoMutated = false; } }
+    if (p >= 1) evoActive = false;
   } else {
     const happy = now < happyEnd;
     let sx = 1 + 0.03 * Math.sin(now * 2.2);
@@ -443,13 +483,31 @@ function frame() {
     vctx.fill();
     vctx.restore();
 
-    // キャラ本体（足元を軸に呼吸・かしぎ・ジャンプ）
+    // キャラ本体（足元を軸に呼吸・かしぎ・ジャンプ）＋突然変異エフェクト
+    const ms = mutationStyle();
     vctx.save();
     vctx.imageSmoothingEnabled = true;
     vctx.imageSmoothingQuality = 'high';
     vctx.translate(pivX, pivY + off.dy);
     vctx.rotate(off.rot);
+
+    // 発光：脈動するグロー（影として後光）
+    if (mutationType === 'glow' && ms) {
+      vctx.shadowColor = ms.color;
+      vctx.shadowBlur  = 16 + Math.sin(now * 4) * 8;
+    }
+    // プラチナ：金属フィルタで質感変更
+    if (mutationType === 'platinum' && ms) {
+      vctx.filter = ms.filter;
+    }
     vctx.drawImage(stageImg, -base / 2, -base, base, base);
+    vctx.filter = 'none';
+    vctx.shadowBlur = 0;
+
+    // 宝石：頭上に宝石をひとつ乗せる（位置はデザイン確定後に調整）
+    if (mutationType === 'jewel' && ms) {
+      drawGem(vctx, 0, -base * 0.92, base * 0.11, ms.color, now);
+    }
     vctx.restore();
   }
 
@@ -532,7 +590,7 @@ let lastPetDate    = '';
 let lastCommitDate = '';
 let lastBadPetDate = ''; // 触られたくない場所をなでた最終日
 let evolutionStage  = 0;
-let mutationPalette = null;
+let mutationType    = null; // 'platinum' | 'glow' | 'jewel' | null
 let bornPalette     = null;
 let coins           = 30;
 let coinPoolStart   = Date.now();
@@ -565,7 +623,10 @@ const DIALOGUE = {
     alreadyPet:    ['きょうは もう なでたよ', 'なでなで ありがと♪'],
     petUp:         ['なつき度アップ！', 'うれしいな〜♪', 'えへへ'],
     evolving:      ['✨ しんか ちゅう… ✨'],
-    mutate:        ['…あれ？ いろが ちがう！', '✨ とつぜんへんい！ ✨', 'レアカラーだ！'],
+    mutate:        () => {
+      const s = mutationStyle();
+      return s ? `✨ とつぜんへんい！ ${s.label}！ ✨` : '✨ とつぜんへんい！ ✨';
+    },
     // コミット量による機嫌変化（xp: 獲得XP, boost: ブースト中か）
     hatch:         ['うまれたよ！', 'はじめまして〜！', 'よろしくね！'],
     commitBig:     (xp, boost) => `+${xp} XP！${boost ? '🔥' : ''} すごいっ！`,
@@ -607,8 +668,16 @@ function updateActiveChar() {
 
 function activeCharData()    { return CHARACTERS[activeChar]; }
 function activeStages()      { return SPRITES[activeCharData().sprite].stages; }
-function currentPaletteName(){ return mutationPalette || bornPalette || activeCharData().palette; }
-function activePalette()     { return getPalette(currentPaletteName()) || PALETTES[activeCharData().palette]; }
+function currentPaletteName(){ return bornPalette || activeCharData().palette; }
+function activePalette() {
+  const base = getPalette(currentPaletteName());
+  // プラチナ変異はコード描画キャラの色も差し替え（画像キャラはフィルタで表現）
+  if (mutationType === 'platinum') {
+    const c = mutationStyle().color;
+    return { body: c, hi: '#ffffff', sh: c };
+  }
+  return base;
+}
 
 function say(event, ...args) {
   const set  = DIALOGUE[activeCharData().personality];
@@ -633,7 +702,7 @@ function savePet() {
   window.codelvl.savePetState({
     affection: params.affection, condition: params.condition,
     hunger: params.hunger,       mood:      params.mood,
-    evolutionStage, mutationPalette, bornPalette,
+    evolutionStage, mutationType, bornPalette,
     lastPetDate, lastCommitDate, lastBadPetDate,
     lastDecayTime: Date.now(), coinPoolStart,
     // キャラ固有decayレートをmain.jsに伝える（nullならデフォルト使用）
@@ -647,9 +716,11 @@ function saveCoins(delta, reason) {
 }
 
 // ---- 孵化・進化 ----
-function hatch() {
-  bornPalette     = HATCH_COLORS[Math.floor(Math.random() * HATCH_COLORS.length)];
-  mutationPalette = null;
+// hatchRate: 突然変異率（確率アップ卵なら 0.05、通常 0.03）
+// 突然変異は孵化時の一発抽選のみ。進化では再抽選しない。
+function hatch(hatchRate = MUTATION_RATE) {
+  bornPalette  = HATCH_COLORS[Math.floor(Math.random() * HATCH_COLORS.length)];
+  mutationType = Math.random() < hatchRate ? rollMutation() : null;
   updateActiveChar();
   savePet();
 }
@@ -658,12 +729,6 @@ function evolve() {
   if (evolutionStage >= activeStages().length - 1) { params.affection = 100; return; }
   evolutionStage++;
   params.affection = Math.max(0, params.affection - 100);
-
-  evoMutated = false;
-  if (Math.random() < MUTATION_RATE) {
-    const pool = Object.keys(RARE_PALETTES).filter((p) => p !== currentPaletteName());
-    if (pool.length) { mutationPalette = pool[Math.floor(Math.random() * pool.length)]; evoMutated = true; }
-  }
 
   evoActive     = true;
   evoStart      = performance.now() / 1000;
@@ -824,7 +889,7 @@ if (window.codelvl) {
     if (!bornPalette) {
       hatch();
       triggerHappy();
-      say('hatch');
+      say(mutationType ? 'mutate' : 'hatch'); // 変異して生まれたら専用セリフ
       savePet();
       renderParams();
       updateCoinDisplay();
@@ -865,7 +930,7 @@ if (window.codelvl) {
     params.hunger     = pet.hunger     ?? 70;
     params.mood       = pet.mood       ?? 80;
     evolutionStage    = pet.evolutionStage  ?? 0;
-    mutationPalette   = pet.mutationPalette ?? null;
+    mutationType      = pet.mutationType    ?? null;
     bornPalette       = pet.bornPalette     ?? null;
     lastPetDate       = pet.lastPetDate     ?? '';
     lastCommitDate    = pet.lastCommitDate  ?? '';
@@ -885,6 +950,101 @@ if (window.codelvl) {
   updateCoinDisplay();
 })();
 
+// ===== アイテムボックス =====
+// アイテム定義カタログ（id → 表示情報）。将来ガチャ排出もこのidを使う。
+const ITEM_CATALOG = {
+  egg_normal:  { name: '普通のたまご',   tag: 'egg',        icon: '🥚' },
+  egg_rare:    { name: '確率アップ卵',   tag: 'egg',        icon: '🥚' },
+  egg_choice:  { name: '選べる卵',       tag: 'egg',        icon: '🥚' },
+  deco_ribbon: { name: 'リボン',         tag: 'decoration', icon: '🎀' },
+  deco_crown:  { name: 'おうかん',       tag: 'decoration', icon: '👑' },
+  deco_glasses:{ name: 'メガネ',         tag: 'decoration', icon: '👓' },
+  furn_chair:  { name: 'いす',           tag: 'furniture',  icon: '🪑' },
+  furn_lamp:   { name: 'ランプ',         tag: 'furniture',  icon: '💡' },
+  furn_plant:  { name: 'かんようしょくぶつ', tag: 'furniture', icon: '🪴' },
+  item_food:   { name: 'ごはん券',       tag: 'item',       icon: '🍖' },
+  item_boost:  { name: 'XPブースト',     tag: 'item',       icon: '🔥' },
+
+  // ⚠ テスト用：ベースカラー3色のモンスター個体（確認後に消す）
+  mon_gecko_green: { name: 'きいろん（休止）', tag: 'monster', icon: '🦎' },
+  mon_gecko_blue:  { name: 'ももこ（休止）',   tag: 'monster', icon: '🦎' },
+  mon_gecko_gold:  { name: 'くろすけ（休止）', tag: 'monster', icon: '🦎' },
+};
+
+const TAG_LABELS = { egg: '卵', monster: 'モンスター', furniture: '家具', decoration: '装飾品', item: 'アイテム' };
+
+let inventory   = [];
+let activeTag   = 'all';
+
+const boxModal = document.getElementById('itembox');
+const boxGrid  = document.getElementById('itembox-grid');
+
+async function refreshInventory() {
+  if (window.codelvl) inventory = await window.codelvl.getInventory();
+  renderInventory();
+}
+
+function renderInventory() {
+  boxGrid.innerHTML = '';
+  const items = inventory.filter((it) => {
+    const meta = ITEM_CATALOG[it.id];
+    if (!meta) return false;
+    return activeTag === 'all' || meta.tag === activeTag;
+  });
+
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.id = 'itembox-empty';
+    empty.textContent = 'なにも持っていません';
+    boxGrid.appendChild(empty);
+    return;
+  }
+
+  for (const it of items) {
+    const meta = ITEM_CATALOG[it.id];
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+    slot.title = `${meta.name} ×${it.qty}`;
+    slot.innerHTML = `<span>${meta.icon}</span><span class="qty">${it.qty}</span>`;
+    // モンスターはクリックで部屋に出す
+    if (meta.tag === 'monster') {
+      slot.addEventListener('click', () => deployMonster(it.id));
+    }
+    boxGrid.appendChild(slot);
+  }
+}
+
+// モンスターを部屋に出す（テスト用：ベースカラー3色のゲッコー）
+function deployMonster(id) {
+  const m = id.match(/^mon_gecko_(\w+)$/);
+  if (!m) return;
+  bornPalette    = m[1];   // green / blue / gold
+  mutationType   = null;
+  evolutionStage = 0;
+  updateActiveChar();
+  savePet();
+  boxModal.classList.add('hidden'); // ボックスを閉じて部屋を見せる
+  triggerHappy();
+  say('hatch');
+}
+
+// ボタン・タブ・閉じる
+document.getElementById('box-btn').addEventListener('click', () => {
+  boxModal.classList.remove('hidden');
+  refreshInventory();
+});
+document.getElementById('box-close').addEventListener('click', () => {
+  boxModal.classList.add('hidden');
+});
+document.querySelectorAll('#itembox-tabs .tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('#itembox-tabs .tab').forEach((t) => t.classList.remove('active'));
+    tab.classList.add('active');
+    activeTag = tab.dataset.tag;
+    renderInventory();
+  });
+});
+
 // ---- ⚠ テスト用ショートカット（確認後は消す）----
 window.addEventListener('keydown', (e) => {
   if (e.key === 'a' || e.key === 'A') {
@@ -895,21 +1055,30 @@ window.addEventListener('keydown', (e) => {
     lastCommitDate = todayStr();
     params.condition = clamp(params.condition + 10, 0, 100);
     if (!bornPalette) {
-      hatch(); triggerHappy(); say('hatch');
+      hatch(); triggerHappy(); say(mutationType ? 'mutate' : 'hatch');
     }
     savePet(); renderParams(); updateCoinDisplay(); setStatus('（テスト）コミット済み');
   } else if (e.key === 't' || e.key === 'T') {
     coinPoolStart -= COIN_UNIT_MS; savePet(); updateCoinDisplay(); setStatus('（テスト）10分すすめた');
   } else if (e.key === 'm' || e.key === 'M') {
-    const pool = Object.keys(RARE_PALETTES).filter((p) => p !== currentPaletteName());
-    mutationPalette = pool[Math.floor(Math.random() * pool.length)]; savePet(); say('mutate');
+    // （テスト）強制突然変異（プラチナ/発光/宝石をランダム）
+    mutationType = rollMutation();
+    savePet(); say('mutate');
   } else if (e.key === 'h' || e.key === 'H') {
     // 卵状態にリセット（孵化テスト用）
-    bornPalette = null; mutationPalette = null; evolutionStage = 0;
+    bornPalette = null; mutationType = null; evolutionStage = 0;
     savePet(); setStatus('（テスト）卵にもどした');
   } else if (e.key === 'b' || e.key === 'B') {
     // 触られたくない場所のテスト（強制ペナルティ発動）
     lastBadPetDate = ''; setStatus('（テスト）bad-touch リセット');
+  } else if (e.key === 'i' || e.key === 'I') {
+    // （テスト）ランダムなアイテムをボックスに付与
+    const ids = Object.keys(ITEM_CATALOG);
+    const id  = ids[Math.floor(Math.random() * ids.length)];
+    window.codelvl?.addItem(id, 1).then(() => {
+      refreshInventory();
+      setStatus(`（テスト）${ITEM_CATALOG[id].name} を入手`);
+    });
   } else if (e.key === 'x' || e.key === 'X') {
     // （テスト）XPブースト発動（1.5h）
     window.codelvl?.activateXpBoost().then(() => setStatus('（テスト）XPブースト1.5h🔥'));

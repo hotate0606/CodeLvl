@@ -57,6 +57,27 @@
         </div>
         <div class="bar"><div class="fill"></div></div>
       </div>
+
+      <div id="toolbar">
+        <button class="tool-btn" id="box-btn">📦 ボックス</button>
+      </div>
+    </div>
+
+    <!-- アイテムボックス モーダル -->
+    <div id="itembox" class="hidden">
+      <div id="itembox-head">
+        <span>📦 アイテムボックス</span>
+        <button id="box-close">✕</button>
+      </div>
+      <div id="itembox-tabs">
+        <button class="tab active" data-tag="all">すべて</button>
+        <button class="tab" data-tag="egg">卵</button>
+        <button class="tab" data-tag="monster">モンスター</button>
+        <button class="tab" data-tag="furniture">家具</button>
+        <button class="tab" data-tag="decoration">装飾品</button>
+        <button class="tab" data-tag="item">アイテム</button>
+      </div>
+      <div id="itembox-grid"></div>
     </div>
   </div>
   <script src="renderer.js"></script>

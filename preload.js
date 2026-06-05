@@ -17,6 +17,11 @@ contextBridge.exposeInMainWorld('codelvl', {
   activateXpBoost: (ms) => ipcRenderer.invoke('activate-xp-boost', ms),
   expandCoinPool:  () => ipcRenderer.invoke('expand-coin-pool'),
 
+  // アイテムボックス
+  getInventory:   () => ipcRenderer.invoke('get-inventory'),
+  addItem:        (id, qty) => ipcRenderer.invoke('add-item', { id, qty }),
+  removeItem:     (id, qty) => ipcRenderer.invoke('remove-item', { id, qty }),
+
   // 定期decayをrendererに通知
   onDecayTick:    (cb) => ipcRenderer.on('decay-tick', (_, pet) => cb(pet)),
 });
