@@ -8,10 +8,27 @@ const SCALE     = 4;
 
 const view = document.getElementById('scene');
 const vctx = view.getContext('2d');
+
+// 表示サイズ（CSS論理px）＝見た目の大きさ。これは変えない。
+const VIEW_W = view.width;   // 320
+const VIEW_H = view.height;  // 256
+
+// 高DPI対応：見た目サイズは VIEW_W×VIEW_H のまま、裏のキャンバスを DPR 倍の
+// 物理解像度にして描く。これでにじみが取れて実質さらに細かく表示できる。
+const DPR = Math.min(window.devicePixelRatio || 1, 3); // 過大な裏キャンバスを避けるため上限3
+view.width  = Math.round(VIEW_W * DPR);
+view.height = Math.round(VIEW_H * DPR);
+view.style.width  = VIEW_W + 'px';   // 表示は等倍に固定（CSSでも固定済みだが明示）
+view.style.height = VIEW_H + 'px';
+
+// 部屋・家具・演出の描画解像度倍率（ドットの細かさ）。物理解像度に合わせる（=4*DPR）。
+// 座標系は今までどおり論理80×64のまま。SS を上げるほど 1/SS 単位の小さなドットが置ける。
+const SS = 4 * DPR;
 vctx.imageSmoothingEnabled = false;
 
 // ===== ゲッコー スプライト（画像ダウンサンプル方式）=====
-const GECKO_DOT_W = 110;
+// ソース解像度も DPR に合わせて上げ、高DPIでもキャラ/卵がくっきり表示されるようにする。
+const GECKO_DOT_W = Math.round(110 * DPR);
 const DOT_SCALE   = 2;
 
 function keepLargestComponent(d, w, h) {
@@ -95,7 +112,17 @@ function makeDotSprite(img, crop, dotW, { bgTol = 70 } = {}) {
 }
 
 // idle はベースカラー3色（green/blue/gold）をパレット別に進化段階別で保持。
-const dotFrames = { gecko: { idle: { green: [], blue: [], gold: [] } } };
+// yawn はあくびモーションの連番フレーム（現状goldベビーのみ素材あり）。
+const dotFrames = {
+  gecko: {
+    idle: { green: [], blue: [], gold: [] },
+    yawn: {
+      green: { frames: [], refW: 0 },
+      blue:  { frames: [], refW: 0 },
+      gold:  { frames: [], refW: 0 },
+    },
+  },
+};
 
 function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
   const img = new Image();
@@ -119,15 +146,96 @@ loadDotSprite('./assets/ニシアフリカトカゲモドキ進化３.png', dotF
 const eggDot = [];
 loadDotSprite('./assets/たまご１.png', eggDot);
 
-const EGG_DRAW_W = 76; // 卵の描画幅(px)。小さめに。大きさはここで調整
+// ===== モーション用スプライトシート切り出し =====
+// cols×rows のグリッドから先頭 count コマを切り出す。各コマは makeDotSprite と同じ
+// 背景flood-fill除去＋最大連結成分抽出を行い、実体のバウンディングボックスを求める。
+//
+// サイズ安定化のキモ：全コマを「コマ0の体幅 → dotW」の共通スケールで拡縮し、さらに
+// 全コマ同一サイズの共通キャンバスへ「足元(下端)ぞろえ＋体の中心で横ぞろえ」して焼き込む。
+// これで各コマの画像サイズ・体の位置が完全に一致し、再生中にサイズがブレない
+// （口開け・頭の反りは上方向の余白に広がるだけ）。
+// target = { frames:[canvas(同一サイズ)...], refW }（refW = コマ0の体幅px。idle体幅合わせ用）
+function buildSheetFrames(img, cols, rows, count, target, dotW, bgTol) {
+  const cw = Math.floor(img.naturalWidth  / cols);
+  const ch = Math.floor(img.naturalHeight / rows);
+  const inset = 4; // セル境界のグリッド線を避けて少し内側を切る
+  const processed = [];
+
+  for (let i = 0; i < count; i++) {
+    const gx = i % cols, gy = (i / cols) | 0;
+    const x0 = gx * cw + inset, y0 = gy * ch + inset;
+    const w  = cw - inset * 2,  h  = ch - inset * 2;
+    const c  = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const cx = c.getContext('2d');
+    cx.imageSmoothingEnabled = false;
+    cx.drawImage(img, x0, y0, w, h, 0, 0, w, h);
+    const id = cx.getImageData(0, 0, w, h);
+    const d  = id.data;
+    floodFillTransparent(d, w, h, [[0,0],[w-1,0],[0,h-1],[w-1,h-1]], bgTol);
+    keepLargestComponent(d, w, h);
+    cx.putImageData(id, 0, 0);
+    // 実体のバウンディングボックス
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (d[(y*w+x)*4+3] > 0) {
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+      }
+    }
+    processed.push({ canvas: c, minX, minY, bw: maxX-minX+1, bh: maxY-minY+1 });
+  }
+  if (!processed.length || processed[0].bw <= 0) return;
+
+  // 共通スケール：コマ0の体幅を dotW にマップ（全コマ同一スケール＝体の大きさが一定）。
+  const scale = dotW / processed[0].bw;
+
+  // 共通キャンバスのサイズ：最も大きく広がるコマに合わせる（頭の反り分の縦余白も確保）。
+  let maxSW = 0, maxSH = 0;
+  for (const p of processed) {
+    maxSW = Math.max(maxSW, p.bw * scale);
+    maxSH = Math.max(maxSH, p.bh * scale);
+  }
+  const outW = Math.ceil(maxSW) + 2;
+  const outH = Math.ceil(maxSH) + 2;
+
+  const frames = processed.map((p) => {
+    const sw = p.bw * scale, sh = p.bh * scale;
+    const o  = document.createElement('canvas');
+    o.width = outW; o.height = outH;
+    const oc = o.getContext('2d');
+    oc.imageSmoothingEnabled = true; oc.imageSmoothingQuality = 'high';
+    // 足元(下端)ぞろえ＋体の中心で横ぞろえ → コマ間で位置・大きさが固定される
+    const dx = (outW - sw) / 2;
+    const dy = outH - sh;
+    oc.drawImage(p.canvas, p.minX, p.minY, p.bw, p.bh, dx, dy, sw, sh);
+    return o;
+  });
+
+  target.frames = frames;
+  target.refW   = Math.round(processed[0].bw * scale); // コマ0の体幅(px)。idle体幅合わせの基準
+}
+
+function loadSheet(src, target, { cols = 3, rows = 3, count, dotW = GECKO_DOT_W, bgTol = 70 }) {
+  const img = new Image();
+  img.onload = () => buildSheetFrames(img, cols, rows, count ?? cols * rows, target, dotW, bgTol);
+  img.src = src;
+}
+
+// あくび（3×3グリッドの先頭7コマ）。goldベビー個体の素材。
+loadSheet('./assets/モーション/ニシアフモーション（あくび）.png',
+          dotFrames.gecko.yawn.gold, { cols: 3, rows: 3, count: 7 });
+
+const EGG_DRAW_W = 60; // 卵の描画幅(px)。部屋全体とのバランスで調整
 
 // オフスクリーン（論理解像度）に描いてから拡大する
 const off = document.createElement('canvas');
-off.width  = LOGICAL_W;
-off.height = LOGICAL_H;
+off.width  = Math.round(LOGICAL_W * SS);   // 実ピクセルは SS 倍。描画時に g を SS 倍スケールするので座標は論理のまま
+off.height = Math.round(LOGICAL_H * SS);
 const g = off.getContext('2d');
 
-const FLOOR_Y = 44; // 床の境界ライン（論理px）
+// アイソメ部屋のラグ中央付近にペットが立つ。ISO.SIDEY〜ISO.FRONTY の中間帯を床面とする。
+const FLOOR_Y = 46; // 論理px。アイソメの床（ラグの上あたり）
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -135,9 +243,10 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // モーションは後日スプライト生成方式で付ける予定。
 
 // ---- 小物描画ヘルパ ----
+// 論理座標で矩形を描く。SS により 1/SS 単位の小数座標も使える（細かいドット）。
 function px(x, y, w, h, color) {
   g.fillStyle = color;
-  g.fillRect(x | 0, y | 0, w, h);
+  g.fillRect(x, y, w, h);
 }
 
 const HEART = ['.X.X.', 'XXXXX', 'XXXXX', '.XXX.', '..X..'];
@@ -154,37 +263,133 @@ function drawPattern(pat, ox, oy, color) {
   }
 }
 
-// ---- 部屋 ----
+// ---- 部屋（アイソメトリック：2枚の壁が中央で合わさる斜め俯瞰）----
+// 中央の縦エッジで左右の壁が合わさり、床はひし形に広がる。外側は透明（カードが透ける）。
+// 画角を近づける＝部屋を画面外まで広げて余白を縮める（端は少しはみ出してクロップ）。
+const ISO = { CX: 40, TOPY: -2, BACKY: 22, SIDETOPY: 20, LX: -10, RX: 90, SIDEY: 44, FRONTY: 66 };
 function drawRoom() {
-  px(0, 0, LOGICAL_W, FLOOR_Y, '#3a3556');
-  px(0, FLOOR_Y - 2, LOGICAL_W, 2, '#322d4a');
-  px(0, FLOOR_Y, LOGICAL_W, LOGICAL_H - FLOOR_Y, '#6b4f3a');
-  for (let x = 0; x < LOGICAL_W; x += 8) px(x, FLOOR_Y, 1, LOGICAL_H - FLOOR_Y, '#5e4533');
-  px(0, FLOOR_Y, LOGICAL_W, 1, '#7d5e44');
+  const { CX, TOPY, BACKY, SIDETOPY, LX, RX, SIDEY, FRONTY } = ISO;
+  const HW = CX - LX;             // 壁/床の横半幅
+  const RISE = SIDETOPY - TOPY;   // アイソメの傾き（横HWあたりの縦上がり）
+  const STEP = 0.25;
+  const Y0 = Math.max(0, TOPY);   // 画面上端でクロップ
+  const row = (y, x0, x1, c) => { if (x1 > x0) px(x0, y, x1 - x0, STEP, c); };
+  const wallTopL = y => CX - HW * (y - TOPY) / RISE;
+  const wallTopR = y => CX + HW * (y - TOPY) / RISE;
+  const seamL = y => CX - HW * (y - BACKY) / RISE;
+  const seamR = y => CX + HW * (y - BACKY) / RISE;
+  const frontL = y => LX + HW * (y - SIDEY) / RISE;
+  const frontR = y => RX - HW * (y - SIDEY) / RISE;
+  const WL = '#d6ebdc', WR = '#c7ddce', FLOOR = '#b07d4f';
 
-  const wx = 10, wy = 7, ww = 22, wh = 18;
-  px(wx - 1, wy - 1, ww + 2, wh + 2, '#2a2640');
-  px(wx, wy, ww, wh, '#7ec8e3');
-  px(wx, wy + wh / 2, ww, wh / 2, '#9ad6ec');
-  px(wx + ww / 2 - 0.5, wy, 1, wh, '#2a2640');
-  px(wx, wy + wh / 2 - 0.5, ww, 1, '#2a2640');
-  px(wx + 4, wy + 4, 4, 1, '#ffffff');
-  px(wx + 3, wy + 5, 6, 1, '#ffffff');
+  // 壁2枚＋床ひし形（行ごとにスパンを塗る）
+  for (let y = Y0; y < FRONTY; y += STEP) {
+    if (y < SIDETOPY)   { row(y, wallTopL(y), CX, WL); row(y, CX, wallTopR(y), WR); }
+    else if (y < BACKY) { row(y, LX, CX, WL); row(y, CX, RX, WR); }
+    else if (y < SIDEY) { const sL = seamL(y), sR = seamR(y); row(y, LX, sL, WL); row(y, sL, sR, FLOOR); row(y, sR, RX, WR); }
+    else                { row(y, frontL(y), frontR(y), FLOOR); }
+  }
 
-  px(48, 9, 14, 11, '#caa45a');
-  px(50, 11, 10, 7, '#3aa0c0');
-  px(52, 14, 3, 3, '#ffe08a');
+  // 床板（右下方向に走る線。床ひし形内に収まる）
+  const plank = (u, c) => { const x0 = CX - HW * u, y0 = BACKY + RISE * u, x1 = x0 + HW, y1 = y0 + RISE, n = 300; for (let i = 0; i <= n; i++) { const t = i / n; px(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 0.5, 0.5, c); } };
+  for (let k = 1; k < 10; k++) plank(k / 10, '#8a5d39');
 
-  const rx = 24, rw = 32;
-  px(rx, FLOOR_Y + 6, rw, 8, '#b5563f');
-  px(rx + 3, FLOOR_Y + 8, rw - 6, 4, '#d97a5e');
+  // 巾木（奥の2辺）＋ コーナー＋壁の輪郭
+  for (let y = BACKY; y < SIDEY; y += STEP) { px(seamL(y) - 0.3, y, 0.7, STEP, '#7a5333'); px(seamR(y) - 0.4, y, 0.7, STEP, '#5e4028'); }
+  px(CX - 0.25, Y0, 0.5, BACKY - Y0, '#bcdac8');
+  for (let y = Y0; y < SIDETOPY; y += STEP) { px(wallTopL(y) - 0.3, y, 0.6, STEP, '#b8d4c2'); px(wallTopR(y) - 0.3, y, 0.6, STEP, '#aeccbb'); }
 
-  px(64, FLOOR_Y + 4, 7, 6, '#9c6b44');
-  px(65, FLOOR_Y + 3, 5, 1, '#b07c50');
-  px(66, FLOOR_Y - 2, 3, 6, '#3f8f55');
-  px(64, FLOOR_Y - 4, 3, 3, '#4fae68');
-  px(68, FLOOR_Y - 5, 3, 3, '#4fae68');
-  px(66, FLOOR_Y - 7, 3, 3, '#5fc878');
+  // ラグ（床のひし形）
+  const diamond = (cx, cy, hw, hh, c) => { for (let y = cy - hh; y < cy + hh; y += STEP) { const t = 1 - Math.abs(y - cy) / hh; const w = hw * t; px(cx - w, y, w * 2, STEP, c); } };
+  diamond(40, 51, 26, 12, '#cdd8e0'); diamond(40, 51, 22, 10, '#dde6ec');
+
+  // 壁オブジェ（縦ストリップで壁の傾きに沿わせた平行四辺形）
+  const wallStripR = (f0, f1, top, h, c) => { for (let f = f0; f <= f1; f += 0.004) { const x = CX + HW * f, yt = TOPY + RISE * f + top; px(x, yt, 0.5, h, c); } };
+  const wallStripL = (f0, f1, top, h, c) => { for (let f = f0; f <= f1; f += 0.004) { const x = CX - HW * f, yt = TOPY + RISE * f + top; px(x, yt, 0.5, h, c); } };
+  const disc = (cx, cy, r, c) => { for (let y = cy - r; y < cy + r; y += STEP) { const w = Math.sqrt(Math.max(0, r * r - (y - cy) * (y - cy))); px(cx - w, y, w * 2, STEP, c); } };
+
+  // 左壁：エアコン＋時計
+  wallStripL(0.52, 0.84, 6, 4, '#e9f1f0'); wallStripL(0.52, 0.84, 6, 1, '#cfdcdb');
+  disc(20, 12, 3, '#dfe7ea'); disc(20, 12, 2.3, '#ffffff'); px(20, 10, 0.4, 2, '#556'); px(20, 12, 1.4, 0.4, '#556');
+
+  // 右壁：窓
+  wallStripR(0.32, 0.8, 5, 13, '#33414f');
+  wallStripR(0.35, 0.77, 6.4, 10.2, '#9fd2ec');
+  wallStripR(0.56, 0.565, 6.4, 10.2, '#33414f');
+  for (let f = 0.35; f <= 0.77; f += 0.004) { const x = CX + HW * f; px(x, TOPY + RISE * f + 11.4, 0.5, 0.5, '#33414f'); }
+}
+
+// 棚（家具）：細グリッド（0.25論理単位 = sp 1マス）で作り込んだ木製本棚。
+// 設置原点(論理) OX,OY。設置範囲は約 16×16 論理px（= sp 64×64マス）。床=FLOOR_Y。
+function drawShelf() {
+  const OX = 3, OY = 42, U = 0.25; // 手前左の床に設置
+  const sp = (x, y, w, h, c) => px(OX + x * U, OY + y * U, w * U, h * U, c);
+
+  // 影
+  sp(5, 62, 54, 2, '#34271d');
+  // 脚
+  sp(5, 59, 8, 4, '#4a3526'); sp(51, 59, 8, 4, '#4a3526');
+  // 外枠＋ベベル
+  sp(2, 2, 60, 58, '#4a3526');      // 本体（濃）
+  sp(4, 4, 56, 54, '#7a5836');      // 面（中木）
+  sp(4, 4, 56, 2, '#a8814f');       // 上ハイライト
+  sp(4, 4, 2, 54, '#9a7344');       // 左ハイライト
+  sp(58, 4, 2, 54, '#3a2a1d');      // 右シャドウ
+  sp(4, 56, 56, 2, '#3a2a1d');      // 下シャドウ
+  // 奥の凹み＋木目
+  sp(7, 7, 50, 49, '#2c2118');
+  for (let i = 0; i < 5; i++) sp(11 + i * 9, 7, 0.5, 49, '#332619');
+  // 棚板2枚
+  for (const by of [23, 39]) { sp(7, by, 50, 3, '#7a5836'); sp(7, by, 50, 1, '#9a7a4a'); sp(7, by + 2, 50, 1, '#1f1610'); }
+
+  // ===== 上段：本＋積み本＋地球儀 =====
+  const book = (x, w, top, base, hi) => {
+    const h = 23 - top;
+    sp(x, top, w, h, base); sp(x, top, 1, h, hi); sp(x + w - 1, top, 1, h, '#1f140e');
+    sp(x, top, w, 1, '#e8dcc0'); sp(x, top + Math.round(h * 0.45), w, 1, hi);
+  };
+  book(9, 4, 8, '#a23f33', '#cf5f4d');
+  book(13, 3, 6, '#b08a2e', '#e6c452');
+  book(16, 4, 9, '#2f6f96', '#4a9ec0');
+  book(20, 3, 8, '#3f8f55', '#5fc878');
+  book(23, 4, 7, '#7a5a9a', '#a87ec0');
+  book(27, 3, 9, '#a23f33', '#cf5f4d');
+  // 横積み本
+  sp(37, 19, 16, 4, '#7a8f5a'); sp(37, 19, 16, 1, '#9fb87a');
+  sp(38, 16, 14, 3, '#5a8fb0'); sp(38, 16, 14, 1, '#82b0d0');
+  sp(39, 13, 12, 3, '#b06a8a'); sp(39, 13, 12, 1, '#d895b0');
+  // 地球儀
+  sp(45, 7, 8, 8, '#3a7d9a'); sp(46, 6, 6, 1, '#3a7d9a'); sp(46, 15, 6, 1, '#3a7d9a');
+  sp(47, 9, 2, 3, '#7fc0d8'); sp(50, 11, 2, 2, '#7fc0d8'); sp(48, 7, 3, 1, '#2c6076');
+  sp(48, 15, 2, 3, '#8a6240');
+
+  // ===== 中段：額＋時計＋鉢植え =====
+  sp(9, 28, 12, 9, '#caa45a'); sp(11, 30, 8, 5, '#7ec8e3'); sp(11, 33, 8, 2, '#5fae68'); sp(12, 31, 2, 1, '#ffffff');
+  sp(25, 27, 10, 10, '#8a6240'); sp(26, 28, 8, 8, '#ece4cc'); sp(30, 29, 1, 4, '#3a2a1d'); sp(30, 31, 3, 1, '#3a2a1d'); sp(29, 32, 1, 1, '#a23f33');
+  sp(41, 32, 9, 5, '#9c6b44'); sp(40, 31, 11, 1, '#b07c50'); sp(42, 32, 7, 1, '#2c2118');
+  sp(44, 26, 1, 6, '#3f8f55'); sp(42, 27, 2, 2, '#4fae68'); sp(46, 27, 3, 2, '#5fc878'); sp(45, 24, 2, 2, '#5fc878');
+
+  // ===== 下段：引き出し＋小瓶＋ティーポット =====
+  sp(9, 43, 20, 11, '#8a5e3a'); sp(9, 43, 20, 1, '#a8744a'); sp(9, 53, 20, 1, '#3a2a1d');
+  sp(18, 43, 1, 11, '#5e4028');
+  sp(13, 47, 2, 2, '#2f2118'); sp(22, 47, 2, 2, '#2f2118');
+  sp(31, 45, 6, 9, '#b58fe0'); sp(31, 46, 1, 8, '#dcc4f5'); sp(32, 43, 4, 2, '#8a6240');
+  sp(41, 47, 12, 7, '#b5604a'); sp(42, 46, 10, 1, '#c87a60'); sp(45, 44, 4, 2, '#b5604a'); sp(46, 43, 2, 1, '#caa45a');
+  sp(52, 48, 3, 3, '#b5604a'); sp(40, 49, 2, 3, '#9a4a38'); sp(43, 48, 2, 2, '#d89580');
+}
+
+// 部屋は静的なので一度だけ描いてキャッシュし、毎フレームはこれを貼る（負荷対策）。
+const roomCanvas = document.createElement('canvas');
+roomCanvas.width = off.width; roomCanvas.height = off.height;
+const roomCtx = roomCanvas.getContext('2d');
+function buildRoomCache() {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, off.width, off.height);   // 部屋の外側は透明にする
+  g.setTransform(SS, 0, 0, SS, 0, 0);
+  g.imageSmoothingEnabled = false;
+  drawRoom();
+  roomCtx.clearRect(0, 0, roomCanvas.width, roomCanvas.height);
+  roomCtx.drawImage(off, 0, 0);
 }
 
 // ===== キャラ素材（ハイブリッド：今はコード描画、将来スプライト差し替え）=====
@@ -261,6 +466,47 @@ const sparkles = [];
 // ---- スプライト用アイドルアニメーション ----
 const idleAnim = { nextTick: 0, tickEnd: 0, tickType: 0 };
 
+// ---- あくびモーション（スプライト方式・現状goldベビーのみ素材あり）----
+// 数秒ごとに自発的にあくびを1サイクル再生する。タイムラインは大あくびのコマ（4〜6）を
+// 長めに見せて自然な“ふわぁ”感を出す。各 d は秒。
+const yawn = { active: false, start: 0, next: 0 };
+const YAWN_PEAK_FRAME = 5; // 口が最大に開くコマ。ここで少し静止しつつブルブル震える
+const YAWN_TIMELINE = [
+  { f: 0, d: 0.07 }, { f: 1, d: 0.08 }, { f: 2, d: 0.10 },
+  { f: 3, d: 0.12 }, { f: 4, d: 0.17 }, { f: 5, d: 0.50 }, { f: 6, d: 0.14 },
+];
+const YAWN_TOTAL = YAWN_TIMELINE.reduce((s, k) => s + k.d, 0);
+
+function yawnFrameAt(elapsed) {
+  let t = 0;
+  for (const k of YAWN_TIMELINE) { if (elapsed < t + k.d) return k.f; t += k.d; }
+  return YAWN_TIMELINE[YAWN_TIMELINE.length - 1].f;
+}
+
+// 現在あくび中なら、表示すべきフレーム画像と基準幅を返す（でなければ null）。
+function currentYawnSet() {
+  if (!yawn.active) return null;
+  const set = dotFrames.gecko.yawn[currentPaletteName()];
+  if (!set || !set.frames.length || !set.refW || evolutionStage !== 0) return null;
+  const f = yawnFrameAt(performance.now() / 1000 - yawn.start);
+  const img = set.frames[f];
+  return img ? { img, refW: set.refW, frame: f } : null;
+}
+
+// あくびのスケジューラ。素材があり待機状態のときだけ周期的に発火させる。
+function updateYawn(now) {
+  const set = dotFrames.gecko.yawn[currentPaletteName()];
+  const avail = set && set.frames.length && set.refW &&
+                bornPalette && evolutionStage === 0 && !evoActive && !hatchActive;
+  if (!avail) { yawn.active = false; return; }
+  if (yawn.next === 0) yawn.next = now + 1.5 + Math.random() * 2; // 初回まで少し待つ（1.5〜3.5秒）
+  if (!yawn.active && now >= yawn.next) { yawn.active = true; yawn.start = now; }
+  if (yawn.active && (now - yawn.start) >= YAWN_TOTAL) {
+    yawn.active = false;
+    yawn.next = now + 3 + Math.random() * 4; // 次のあくびまで3〜7秒
+  }
+}
+
 function getSpriteOffsets(now) {
   // 縦ゆれ（呼吸の上下動・小ジャンプ）は廃止。じっと待機する。
   // ごくわずかな傾きの揺れ（体重移動感）だけ残す。縦移動はしない。
@@ -282,6 +528,16 @@ function getSpriteOffsets(now) {
 
 const EVO_DUR = 3.0;
 let evoActive = false, evoStart = 0, evoBurstDone = false;
+
+// 孵化演出（卵が揺れる→光に包まれる→割れてベビー登場）
+const HATCH_DUR = 2.2;
+let hatchActive = false, hatchStart = 0, hatchBurstDone = false;
+
+function startHatchEffect() {
+  hatchActive    = true;
+  hatchStart     = performance.now() / 1000;
+  hatchBurstDone = false;
+}
 
 function triggerHappy() {
   happyEnd = performance.now() / 1000 + 1.2;
@@ -339,6 +595,171 @@ function renderEvolution(now, p) {
   }
 }
 
+// 現在のキャラ（ベビー/進化後）を vctx に描く。alpha でフェードイン可。
+function drawCreatureSprite(now, alpha = 1) {
+  const pal   = currentPaletteName();
+  const st    = activeStages()[Math.min(evolutionStage, activeStages().length - 1)];
+  const baseW = 100 * st.scale; // 部屋全体とのバランスで調整
+  const pivX = VIEW_W / 2, pivY = (FLOOR_Y + 8) * SCALE;
+  const offs = getSpriteOffsets(now);
+
+  // あくびモーション中なら専用フレームを使う（素材があるときのみ）。
+  const yset = currentYawnSet();
+
+  let dotImg, dW, dH, anchorX, anchorY, shadowW;
+  if (yset) {
+    // 全コマ同一サイズの共通キャンバス。コマ0の体幅(refW)を baseW に合わせるので、
+    // dW/dH はコマ間で完全に一定＝サイズが全くブレない。キャンバス中心=体の中心、
+    // 下端=足元なので、足元中心アンカーで常に接地して再生される。
+    dotImg = yset.img;
+    const scale = baseW / yset.refW;
+    dW = dotImg.width * scale; dH = dotImg.height * scale;
+    anchorX = dW / 2;   // キャンバス中心 = 体の中心X
+    anchorY = dH;       // キャンバス下端 = 足元Y
+    shadowW = baseW;    // 影は体幅基準で固定（口開け・尻尾で広がらない）
+  } else {
+    const frames = dotFrames.gecko.idle[pal];
+    let idx = 0;
+    if (frames) {
+      idx = Math.min(evolutionStage, frames.length - 1);
+      while (idx > 0 && !frames[idx]) idx--;
+    }
+    dotImg = (frames && frames[idx]) || dotFrames.gecko.idle.gold[0];
+    if (!dotImg) return;
+    const scale = baseW / dotImg.width;
+    dW = dotImg.width * scale; dH = dotImg.height * scale;
+    anchorX = dW / 2;  // 体の中心X
+    anchorY = dH;      // 足元Y（画像の下端）
+    shadowW = dW;
+  }
+
+  // 影
+  vctx.save();
+  vctx.globalAlpha = 0.2 * alpha;
+  vctx.fillStyle = '#1a1025';
+  vctx.beginPath();
+  vctx.ellipse(pivX, pivY + 3, shadowW * 0.4, 5, 0, 0, Math.PI * 2);
+  vctx.fill();
+  vctx.restore();
+
+  // 最大あくびのコマでは静止しつつ小刻みに震える「ブルブル」演出（本体のみ。影は固定）。
+  let shakeX = 0, shakeY = 0, shakeRot = 0;
+  if (yset && yset.frame === YAWN_PEAK_FRAME) {
+    shakeX   = Math.sin(now * 150) * 0.45;  // 横の小刻み（≒24Hz・速め）
+    shakeY   = Math.sin(now * 174) * 0.22;  // 縦は控えめ
+    shakeRot = Math.sin(now * 162) * 0.007; // ごく僅かな角度の震え
+  }
+
+  // 本体（縮小＋微回転で最近傍だと走査線が出るため高品質補間にする）
+  vctx.save();
+  vctx.globalAlpha = alpha;
+  vctx.imageSmoothingEnabled = true;
+  vctx.imageSmoothingQuality = 'high';
+  vctx.translate(pivX + shakeX, pivY + offs.dy + shakeY);
+  vctx.rotate(offs.rot * 0.5 + shakeRot);
+  vctx.drawImage(dotImg, -anchorX, -anchorY, dW, dH);
+  vctx.restore();
+}
+
+// 卵を vctx に描く（孵化前）。
+function drawEggSprite(now) {
+  const img = eggDot[0];
+  if (!img) return;
+  const dW = EGG_DRAW_W, dH = img.height * (EGG_DRAW_W / img.width);
+  const pivX = VIEW_W / 2, pivY = (FLOOR_Y + 8) * SCALE;
+  const offs = getSpriteOffsets(now);
+  vctx.save();
+  vctx.globalAlpha = 0.2;
+  vctx.fillStyle = '#1a1025';
+  vctx.beginPath();
+  vctx.ellipse(pivX, pivY + 3, dW * 0.4, 5, 0, 0, Math.PI * 2);
+  vctx.fill();
+  vctx.restore();
+  vctx.save();
+  vctx.imageSmoothingEnabled = true;
+  vctx.imageSmoothingQuality = 'high';
+  vctx.translate(pivX, pivY + offs.dy);
+  vctx.rotate(offs.rot * 0.5);
+  vctx.drawImage(img, -dW / 2, -dH, dW, dH);
+  vctx.restore();
+}
+
+// 孵化演出（vctx に直接描く）。卵が光に溶けて消えると、ベビーがフェードインで現れる。
+//   0.00-0.55 : 卵がガタガタ揺れる（だんだん激しく）
+//   0.55-0.78 : 光が満ちて卵が薄れていく
+//   0.70-0.90 : 閃光＋きらめき（割れる瞬間）
+//   0.85-     : ハート（ベビー登場）
+function renderHatch(now, p) {
+  const img = eggDot[0];
+  const pivX = VIEW_W / 2;
+  const pivY = (FLOOR_Y + 8) * SCALE;
+  const dW = img ? img.width  * (EGG_DRAW_W / img.width) : EGG_DRAW_W;
+  const dH = img ? img.height * (EGG_DRAW_W / img.width) : EGG_DRAW_W;
+  const glowCY = pivY - dH * 0.5;
+
+  // フェーズごとの 揺れ / 光量 / 卵の不透明度
+  let shakeX = 0, glow = 0, eggA = 1;
+  if (p < 0.55) {
+    const fp = p / 0.55;
+    shakeX = Math.sin(now * 38) * (1 + fp * 5);
+    glow   = fp * 0.35;
+  } else if (p < 0.78) {
+    const fp = (p - 0.55) / 0.23;
+    shakeX = Math.sin(now * 60) * 4 * (1 - fp);
+    glow   = 0.35 + fp * 0.65;
+    eggA   = 1 - fp;            // 卵が光に溶ける
+  } else {
+    eggA = 0;
+    glow = Math.max(0, 1 - (p - 0.78) / 0.22);
+  }
+
+  // 後光（白い放射グラデーション）
+  if (glow > 0) {
+    const r = dW * (0.7 + glow * 0.5);
+    const grd = vctx.createRadialGradient(pivX, glowCY, 0, pivX, glowCY, r);
+    grd.addColorStop(0,   'rgba(255,255,255,1)');
+    grd.addColorStop(0.6, 'rgba(255,245,200,0.5)');
+    grd.addColorStop(1,   'rgba(255,245,200,0)');
+    vctx.save();
+    vctx.globalAlpha = clamp(glow, 0, 1) * 0.85;
+    vctx.fillStyle = grd;
+    vctx.beginPath();
+    vctx.arc(pivX, glowCY, r, 0, Math.PI * 2);
+    vctx.fill();
+    vctx.restore();
+  }
+
+  // 卵本体（揺れながら薄れる）
+  if (img && eggA > 0.01) {
+    vctx.save();
+    vctx.globalAlpha = eggA;
+    vctx.imageSmoothingEnabled = true;
+    vctx.imageSmoothingQuality = 'high';
+    vctx.translate(pivX + shakeX, pivY);
+    vctx.drawImage(img, -dW / 2, -dH, dW, dH);
+    vctx.restore();
+  }
+
+  // ベビーをフェードインで出す（閃光に隠れて入れ替わる）
+  const babyA = clamp((p - 0.70) / 0.18, 0, 1);
+  if (babyA > 0.01) drawCreatureSprite(now, babyA);
+
+  // 閃光＋きらめき（割れる瞬間。卵→ベビーの切り替わりを覆って隠す）
+  if (p >= 0.70 && p < 0.90) {
+    if (!hatchBurstDone) { spawnSparkles(); hatchBurstDone = true; }
+    const fa = 1 - Math.abs((p - 0.78) / 0.12);
+    vctx.save();
+    vctx.fillStyle = `rgba(255,255,255,${clamp(fa, 0, 1)})`;
+    vctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    vctx.restore();
+  }
+
+  // 仕上げ：ハート
+  if (p >= 0.85 && hearts.length < 2) {
+    hearts.push({ x: 40 + (Math.random() * 16 - 8), y: 28, vy: 8, vx: Math.random() * 3 - 1.5, life: 1.4 });
+  }
+}
+
 // ---- メインループ ----
 let prev = performance.now() / 1000;
 
@@ -350,7 +771,12 @@ function frame() {
   if (!blinking && now - lastBlink > nextBlinkGap) { blinking = true; blinkEnd = now + 0.12; }
   if (blinking && now > blinkEnd) { blinking = false; lastBlink = now; nextBlinkGap = 2 + Math.random() * 3; }
 
-  drawRoom();
+  // キャッシュ済みの部屋を等倍で貼る（外側は透明）。その上にエフェクトを論理座標で描く。
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.imageSmoothingEnabled = false;
+  g.clearRect(0, 0, off.width, off.height);
+  g.drawImage(roomCanvas, 0, 0);
+  g.setTransform(SS, 0, 0, SS, 0, 0);
 
   if (evoActive) {
     const p = clamp((now - evoStart) / EVO_DUR, 0, 1);
@@ -372,59 +798,34 @@ function frame() {
     drawPattern(SPARK, s.x - 2, s.y - 2, s.life > 0.5 ? '#ffffff' : '#ffe27a');
   }
 
+  // 高DPI: 以降の vctx 描画は論理(VIEW_W×VIEW_H)座標で行い、DPR 倍で物理解像度へ。
+  vctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
   // 部屋を拡大してviewへ（ここでvctxがクリアされる）
   vctx.imageSmoothingEnabled = false;
-  vctx.clearRect(0, 0, view.width, view.height);
-  vctx.drawImage(off, 0, 0, LOGICAL_W, LOGICAL_H, 0, 0, view.width, view.height);
+  vctx.clearRect(0, 0, VIEW_W, VIEW_H);
+  vctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, VIEW_W, VIEW_H);
 
-  // キャラ／卵の描画（ドット絵）。進化演出中はキャラを出さず演出に任せる。
-  if (!evoActive) {
-    const pal = currentPaletteName(); // green / blue / gold
-    // 現在のキャラの画像（進化段階別）を表示。モーションは後日スプライト生成方式で対応予定。
-    const frames = dotFrames.gecko.idle[pal];
-    // 進化段階で画像を切替（[0]=ベビー, [1]=進化後）。未制作の段階は直近の画像にフォールバック。
-    let idx = 0;
-    if (frames) {
-      idx = Math.min(evolutionStage, frames.length - 1);
-      while (idx > 0 && !frames[idx]) idx--;
-    }
-    // 孵化前（bornPalette未設定）は卵を表示。孵化後はキャラ（進化段階別）を表示。
-    const isEgg  = !bornPalette;
-    const dotImg = isEgg
-      ? eggDot[0]
-      : ((frames && frames[idx]) || dotFrames.gecko.idle.gold[0]);
-    if (dotImg) {
-      // 描画サイズ（アスペクト比は維持）。キャラ: 120 * st.scale ／ 卵: EGG_DRAW_W（小さめ）。
-      const st    = activeStages()[Math.min(evolutionStage, activeStages().length - 1)];
-      const baseW = isEgg ? EGG_DRAW_W : 120 * st.scale;
-      const scale = baseW / dotImg.width;
-      const dW   = dotImg.width  * scale;
-      const dH   = dotImg.height * scale;
-      const pivX = view.width / 2;
-      const pivY = (FLOOR_Y + 8) * SCALE;
-      const offs = getSpriteOffsets(now);
-      vctx.save();
-      vctx.globalAlpha = 0.2;
-      vctx.fillStyle = '#1a1025';
-      vctx.beginPath();
-      vctx.ellipse(pivX, pivY + 3, dW * 0.4, 5, 0, 0, Math.PI * 2);
-      vctx.fill();
-      vctx.restore();
-      vctx.save();
-      // キャラ/卵は縮小＋微回転するため、最近傍だと走査線状のちらつき
-      // （昔のビデオのような縦横線）が出る。高品質補間で滑らかにする。
-      vctx.imageSmoothingEnabled = true;
-      vctx.imageSmoothingQuality = 'high';
-      vctx.translate(pivX, pivY + offs.dy);
-      vctx.rotate(offs.rot * 0.5);
-      vctx.drawImage(dotImg, -dW / 2, -dH, dW, dH);
-      vctx.restore();
-    }
+  // あくびモーションのスケジューリング（素材があるときだけ周期発火）
+  updateYawn(now);
+
+  // キャラ／卵の描画（ドット絵）。進化・孵化演出中は専用描画に任せる。
+  if (!evoActive && !hatchActive) {
+    if (!bornPalette) drawEggSprite(now);        // 孵化前は卵
+    else              drawCreatureSprite(now);   // 孵化後はキャラ（進化段階別／あくび中はモーション）
+  }
+
+  // 孵化演出：ベビーの上に卵を重ねて揺らし、光に溶けてベビーが現れる
+  if (hatchActive) {
+    const hp = clamp((now - hatchStart) / HATCH_DUR, 0, 1);
+    renderHatch(now, hp);
+    if (hp >= 1) hatchActive = false;
   }
 
   requestAnimationFrame(frame);
 }
 
+buildRoomCache();        // 静的な部屋を一度だけ描いてキャッシュ
 requestAnimationFrame(frame);
 
 // ---- ゲームパラメータ ----
@@ -440,8 +841,10 @@ let lastCommitDate = '';
 let lastBadPetDate = ''; // 触られたくない場所をなでた最終日
 let evolutionStage  = 0;
 let mutationType    = null; // 'platinum' | 'glow' | 'jewel' | null
-let bornPalette     = null;
-let coins           = 30;
+let bornPalette      = null;
+let evolutionLocked      = false; // true のとき、なつき度MAXでも進化しない（たいかのアメ：トグル）
+let evolutionHardLocked  = false; // true のとき、しんかのアメ以外では解除不可（せいちょうしたくないアメ）
+let coins            = 30;
 let coinPoolStart   = Date.now();
 
 const COIN_UNIT_MS   = 10 * 60 * 1000;
@@ -482,8 +885,17 @@ const DIALOGUE = {
     commitNormal:  (xp, boost) => `+${xp} XP！${boost ? '🔥' : ''} えらい！`,
     commitSmall:   (xp, boost) => `+${xp} XP… もうちょっとかいて？`,
     capReached:    ['きょうは もう じゅうぶん！', 'また あした がんばろう！'],
-    badTouch:      ['そこは だめ！', 'やめてよ〜！', 'ぷんぷん！'],
-    badTouchDone:  ['きょうは もう やだ'],
+    badTouch:          ['そこは だめ！', 'やめてよ〜！', 'ぷんぷん！'],
+    badTouchDone:      ['きょうは もう やだ'],
+    evoUpUsed:         ['しんかした！！✨', 'へんしん〜！✨'],
+    evoStopActivate:    ['このままでいる！🔒', 'まだしんかしたくない！🔒'],
+    evoStopDeactivate:  ['ロックがとけたよ！', 'しんかしてもいいかも…'],
+    evoHardLockOn:      ['ぜったいしんかしない！🍭🔒', 'しんかのアメじゃないとだめだよ！🔒'],
+    evoHardLockAlready: ['もうかかってるよ！', 'まだとけてないよ！'],
+    evoHardLockBlocked: ['しんかのアメでしかとかせないよ！🔐', 'そのアメじゃとかせない…🔐'],
+    evoLocked:          ['しんかしたくないの！🔒', 'まだこのままでいたい！🔒'],
+    evoAlreadyMax:      ['もう さいこうけいたいだよ！', 'これいじょう しんかできない！'],
+    evoNotBorn:         ['まだ たまごだよ！', 'うまれてないよ！'],
   },
 };
 
@@ -545,6 +957,7 @@ function savePet() {
     evolutionStage, mutationType, bornPalette,
     lastPetDate, lastCommitDate, lastBadPetDate,
     lastDecayTime: Date.now(), coinPoolStart,
+    evolutionLocked, evolutionHardLocked,
     // キャラ固有decayレートをmain.jsに伝える（nullならデフォルト使用）
     decayRates: activeCharData().decayRates,
   });
@@ -568,7 +981,7 @@ function hatch(hatchRate = MUTATION_RATE) {
 function evolve() {
   if (evolutionStage >= activeStages().length - 1) { params.affection = 100; return; }
   evolutionStage++;
-  params.affection = Math.max(0, params.affection - 100);
+  params.affection = 0; // バーを越えて得た分は持ち越さず、0から再スタート
 
   evoActive     = true;
   evoStart      = performance.now() / 1000;
@@ -585,9 +998,10 @@ function tryAdvanceStage() {
   if (!bornPalette) {
     hatch();                 // 卵 → ベビー誕生
     params.affection = 0;    // 次の段階（進化）に向けてリセット
-    triggerHappy();
+    startHatchEffect();      // 卵が割れて光に包まれる演出
     say(mutationType ? 'mutate' : 'hatch');
   } else {
+    if (evolutionLocked || evolutionHardLocked) return false; // 進化ロック中は進化しない
     evolve();                // ベビー → 進化後
   }
   savePet();
@@ -674,7 +1088,7 @@ setInterval(updateCoinDisplay, 1000);
 
 // ---- ごはんボタン ----
 document.getElementById('feed-btn').addEventListener('click', () => {
-  if (evoActive) return;
+  if (evoActive || hatchActive) return;
   if (coins < FOOD_COST) { say('notEnoughCoin'); return; }
   coins -= FOOD_COST;
   params.hunger = clamp(params.hunger + FEED_HUNGER, 0, 100);
@@ -689,7 +1103,7 @@ document.getElementById('feed-btn').addEventListener('click', () => {
 
 // ---- キャンバスクリック（なでる・触られたくない場所）----
 view.addEventListener('click', (e) => {
-  if (evoActive) return;
+  if (evoActive || hatchActive) return;
 
   // クリック位置を論理座標に変換
   const rect = view.getBoundingClientRect();
@@ -728,7 +1142,11 @@ view.addEventListener('click', (e) => {
   } else {
     params.affection = clamp(params.affection + PET_GAIN, 0, 100);
     lastPetDate = today;
-    if (!tryAdvanceStage()) say('petUp'); // MAXなら 卵→ベビー / ベビー→進化
+    if (!tryAdvanceStage()) {
+      // ロック中でなつき度MAXなら専用セリフ、それ以外は通常セリフ
+      if ((evolutionLocked || evolutionHardLocked) && params.affection >= 100) say('evoLocked');
+      else say('petUp');
+    }
   }
   savePet();
   renderParams();
@@ -792,6 +1210,8 @@ if (window.codelvl) {
     lastCommitDate    = pet.lastCommitDate  ?? '';
     lastBadPetDate    = pet.lastBadPetDate  ?? '';
     coinPoolStart     = pet.coinPoolStart   ?? Date.now();
+    evolutionLocked      = pet.evolutionLocked     ?? false;
+    evolutionHardLocked  = pet.evolutionHardLocked ?? false;
     coins             = state.coins ?? 30;
     coinPoolUnits     = state.coinPoolUnits ?? 3;
     updateUI(state);
@@ -804,6 +1224,7 @@ if (window.codelvl) {
   renderParams();
   renderCoins();
   updateCoinDisplay();
+  renderEvoLock();       // 進化ロックバッジを初期表示
 })();
 
 // ===== アイテムボックス =====
@@ -818,8 +1239,11 @@ const ITEM_CATALOG = {
   furn_chair:  { name: 'いす',           tag: 'furniture',  icon: '🪑' },
   furn_lamp:   { name: 'ランプ',         tag: 'furniture',  icon: '💡' },
   furn_plant:  { name: 'かんようしょくぶつ', tag: 'furniture', icon: '🪴' },
-  item_food:   { name: 'ごはん券',       tag: 'item',       icon: '🍖' },
-  item_boost:  { name: 'XPブースト',     tag: 'item',       icon: '🔥' },
+  item_food:     { name: 'ごはん券',                   tag: 'item', icon: '🍖' },
+  item_boost:    { name: 'XPブースト',                 tag: 'item', icon: '🔥' },
+  item_evo_up:    { name: 'しんかのアメ',           tag: 'item', icon: '🍡' },
+  item_evo_stop:  { name: 'たいかのアメ',           tag: 'item', icon: '🍬' },
+  item_evo_stop2: { name: 'せいちょうしたくないアメ', tag: 'item', icon: '🍭' },
 
   // ⚠ テスト用：ベースカラー3色のモンスター個体（確認後に消す）
   mon_gecko_green: { name: 'きいろん（休止）', tag: 'monster', icon: '🦎' },
@@ -860,11 +1284,21 @@ function renderInventory() {
     const meta = ITEM_CATALOG[it.id];
     const slot = document.createElement('div');
     slot.className = 'slot';
-    slot.title = `${meta.name} ×${it.qty}`;
+    // ロック系アメ：有効中は視覚的に強調
+    const isSoftActive = it.id === 'item_evo_stop'  && evolutionLocked;
+    const isHardActive = it.id === 'item_evo_stop2' && evolutionHardLocked;
+    if (isSoftActive) slot.classList.add('slot-active');
+    if (isHardActive) slot.classList.add('slot-hard-active');
+    const activeMark = isSoftActive ? ' (有効中🔒)' : isHardActive ? ' (有効中🔐)' : '';
+    slot.title = `${meta.name}${activeMark} ×${it.qty}`;
     slot.innerHTML = `<span>${meta.icon}</span><span class="qty">${it.qty}</span>`;
     // モンスターはクリックで部屋に出す
     if (meta.tag === 'monster') {
       slot.addEventListener('click', () => deployMonster(it.id));
+    }
+    // 消費アイテムはクリックで使用
+    if (it.id === 'item_evo_up' || it.id === 'item_evo_stop' || it.id === 'item_evo_stop2') {
+      slot.addEventListener('click', () => useItem(it.id));
     }
     boxGrid.appendChild(slot);
   }
@@ -884,6 +1318,59 @@ function deployMonster(id) {
   say('hatch');
 }
 
+// 進化ロックバッジの表示/非表示を切り替える
+function renderEvoLock() {
+  const badge = document.getElementById('evo-lock-badge');
+  if (!badge) return;
+  const locked = evolutionLocked || evolutionHardLocked;
+  badge.classList.toggle('hidden', !locked);
+  // ハードロック中は 🔐、ソフトロック中は 🔒 で区別
+  badge.textContent = evolutionHardLocked ? '🔐' : '🔒';
+}
+
+// アイテムを使用する（消費系アイテム）
+async function useItem(id) {
+  if (evoActive || hatchActive) return;
+  const entry = inventory.find(it => it.id === id);
+  if (!entry || entry.qty < 1) return;
+
+  if (id === 'item_evo_up') {
+    // しんかのアメ：即進化。ソフト・ハードどちらのロックも強制解除（卵・最終形態は不可）
+    if (!bornPalette) { say('evoNotBorn'); return; }
+    if (evolutionStage >= activeStages().length - 1) { say('evoAlreadyMax'); return; }
+    await window.codelvl?.removeItem(id, 1);
+    evolutionLocked     = false;
+    evolutionHardLocked = false;
+    evolve();
+    say('evoUpUsed');
+    savePet();
+    renderEvoLock();
+    refreshInventory();
+
+  } else if (id === 'item_evo_stop') {
+    // たいかのアメ：ソフトロックをトグル（ON↔OFF 各1個消費）
+    // ただしハードロック中は解除できない
+    if (evolutionHardLocked) { say('evoHardLockBlocked'); return; } // 消費しない
+    await window.codelvl?.removeItem(id, 1);
+    evolutionLocked = !evolutionLocked;
+    say(evolutionLocked ? 'evoStopActivate' : 'evoStopDeactivate');
+    savePet();
+    renderEvoLock();
+    refreshInventory();
+
+  } else if (id === 'item_evo_stop2') {
+    // せいちょうしたくないアメ：ハードロックを設定（しんかのアメ以外では解除不可）
+    if (evolutionHardLocked) { say('evoHardLockAlready'); return; } // 消費しない
+    await window.codelvl?.removeItem(id, 1);
+    evolutionLocked     = false; // ソフトロックは上書きしてハードロックに統合
+    evolutionHardLocked = true;
+    say('evoHardLockOn');
+    savePet();
+    renderEvoLock();
+    refreshInventory();
+  }
+}
+
 // ボタン・タブ・閉じる
 document.getElementById('box-btn').addEventListener('click', () => {
   boxModal.classList.remove('hidden');
@@ -899,6 +1386,7 @@ document.getElementById('reset-evo-btn').addEventListener('click', () => {
   mutationType = null;
   evolutionStage = 0;
   evoActive = false;            // 進化演出が走っていたら止める
+  hatchActive = false;          // 孵化演出も止める
   params.affection = 0;         // なつきも戻して再度の進化テストをしやすく
   updateActiveChar();
   savePet();
@@ -939,6 +1427,15 @@ window.addEventListener('keydown', (e) => {
     // 卵状態にリセット（孵化テスト用）
     bornPalette = null; mutationType = null; evolutionStage = 0;
     savePet(); setStatus('（テスト）卵にもどした');
+  } else if (e.key === 'y' || e.key === 'Y') {
+    // （テスト）あくびモーションを即発火（goldベビーのみ素材あり）
+    const set = dotFrames.gecko.yawn[currentPaletteName()];
+    if (set && set.frames.length && evolutionStage === 0 && bornPalette) {
+      yawn.active = true; yawn.start = performance.now() / 1000;
+      setStatus('（テスト）あくび');
+    } else {
+      setStatus('（テスト）あくび素材なし（goldベビーで試して）');
+    }
   } else if (e.key === 'b' || e.key === 'B') {
     // 触られたくない場所のテスト（強制ペナルティ発動）
     lastBadPetDate = ''; setStatus('（テスト）bad-touch リセット');

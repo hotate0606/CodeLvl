@@ -70,6 +70,8 @@ function defaultPetState() {
     coinPoolStart:  Date.now(),
     // キャラ固有レート（nullなら共通デフォルト。rendererがキャラ選択時に書き込む）
     decayRates:     null,
+    evolutionLocked:     false, // ソフトロック中（たいかのアメ：トグル）
+    evolutionHardLocked: false, // ハードロック中（せいちょうしたくないアメ：しんかのアメでしか解除不可）
   };
 }
 

@@ -405,3 +405,25 @@ body {
   font-size: 11px;
   padding: 30px 0;
 }
+
+/* 進化ロックバッジ（なつきバーの横） */
+#evo-lock-badge {
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.9;
+}
+#evo-lock-badge.hidden { display: none; }
+
+/* たいかのアメ：ソフトロック有効中スロット（黄色） */
+.slot.slot-active {
+  border-color: rgba(255, 200, 50, 0.7);
+  background: rgba(255, 200, 50, 0.08);
+  box-shadow: 0 0 6px rgba(255, 200, 50, 0.25);
+}
+
+/* せいちょうしたくないアメ：ハードロック有効中スロット（赤紫） */
+.slot.slot-hard-active {
+  border-color: rgba(220, 80, 180, 0.8);
+  background: rgba(220, 80, 180, 0.10);
+  box-shadow: 0 0 8px rgba(220, 80, 180, 0.35);
+}
