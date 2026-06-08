@@ -6,6 +6,10 @@ const LOGICAL_W = 80;
 const LOGICAL_H = 64;
 const SCALE     = 4;
 
+// 画角ズーム：部屋・ペット・演出すべてに均一に効く。ペットの足元を中心に寄せるので
+// 拡大してもペットは接地したまま。1.0=等倍、上げるほど寄る（余白が減る）。
+const SCENE_ZOOM = 1.15;
+
 const view = document.getElementById('scene');
 const vctx = view.getContext('2d');
 
@@ -799,11 +803,17 @@ function frame() {
   }
 
   // 高DPI: 以降の vctx 描画は論理(VIEW_W×VIEW_H)座標で行い、DPR 倍で物理解像度へ。
+  // まず等倍でクリアしてから、画角ズームを適用する。
   vctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-
-  // 部屋を拡大してviewへ（ここでvctxがクリアされる）
-  vctx.imageSmoothingEnabled = false;
   vctx.clearRect(0, 0, VIEW_W, VIEW_H);
+
+  // 画角を寄せる：ペットの足元(zcx,zcy)を中心に均一ズーム。これ以降の vctx 描画
+  // （部屋・ペット・孵化/進化演出）すべてに効くので、部屋とペットがズレない。
+  const Z = SCENE_ZOOM, zcx = VIEW_W / 2, zcy = (FLOOR_Y + 8) * SCALE;
+  vctx.setTransform(DPR * Z, 0, 0, DPR * Z, DPR * (zcx - Z * zcx), DPR * (zcy - Z * zcy));
+
+  // 部屋を拡大してviewへ
+  vctx.imageSmoothingEnabled = false;
   vctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, VIEW_W, VIEW_H);
 
   // あくびモーションのスケジューリング（素材があるときだけ周期発火）
