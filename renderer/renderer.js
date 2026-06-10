@@ -116,17 +116,34 @@ function makeDotSprite(img, crop, dotW, { bgTol = 70 } = {}) {
 }
 
 // idle はベースカラー3色（green/blue/gold）をパレット別に進化段階別で保持。
-// yawn はあくびモーションの連番フレーム（現状goldベビーのみ素材あり）。
+// yawn[stage][pal] はステージ別あくびモーション（0=ベビー7コマ, 1=進化7コマ, 2=最終進化10コマ）。
+// idleAnim[stage][pal] は待機アニメ（現状は最終進化のみ。あれば静止idleより優先）。
+const palSet = () => ({
+  green: { frames: [], refW: 0 },
+  blue:  { frames: [], refW: 0 },
+  gold:  { frames: [], refW: 0 },
+});
 const dotFrames = {
   gecko: {
     idle: { green: [], blue: [], gold: [] },
-    yawn: {
-      green: { frames: [], refW: 0 },
+    yawn: [palSet(), palSet(), palSet()],
+    idleAnim: [null, null, palSet()],
+  },
+  // スライム（将来の種族。ゲーム側の選択ロジックは未実装、素材のみ先行ロード）
+  slime: {
+    idleAnim: {
+      pink:  { frames: [], refW: 0 },
       blue:  { frames: [], refW: 0 },
-      gold:  { frames: [], refW: 0 },
+      green: { frames: [], refW: 0 },
     },
   },
 };
+
+// 現ステージ（0..2にクランプ）のあくびセットを返す
+function yawnSetFor(stage, pal) {
+  const byStage = dotFrames.gecko.yawn[Math.min(stage, dotFrames.gecko.yawn.length - 1)];
+  return byStage ? byStage[pal] : null;
+}
 
 function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
   const img = new Image();
@@ -138,14 +155,18 @@ function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
 }
 
 // idle[pal] は進化段階で索引: [0]=ベビー, [1]=進化後
-// stage 0（ベビー）: 1→green, 2→blue, 3→gold（イラストsprite と同じ対応）
-loadDotSprite('./assets/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green);
-loadDotSprite('./assets/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue);
-loadDotSprite('./assets/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold);
+// 3・進化３（gold）が生成原本。1・2／進化１・進化２は tools/recolor.html で
+// goldから色替え生成したもの（柄・構図・ポーズは全色共通＝モーションと完全に揃う）。
+// goldも同ツールのパレット再構成（自身のクラスタ色）を通してあり、質感が3色で統一。
+// 加工前のAI生成原本はgit履歴を参照。
+// stage 0（ベビー）: 1→green, 2→blue, 3→gold
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold);
 // stage 1（進化後）: 進化１→green, 進化２→blue, 進化３→gold（番号＝個体が一致）
-loadDotSprite('./assets/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1);
-loadDotSprite('./assets/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1);
-loadDotSprite('./assets/ニシアフリカトカゲモドキ進化３.png', dotFrames.gecko.idle.gold,  1);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化３.png', dotFrames.gecko.idle.gold,  1);
 // 卵（孵化前）: ドット絵。eggDot[0]
 const eggDot = [];
 loadDotSprite('./assets/たまご１.png', eggDot);
@@ -226,9 +247,31 @@ function loadSheet(src, target, { cols = 3, rows = 3, count, dotW = GECKO_DOT_W,
   img.src = src;
 }
 
-// あくび（3×3グリッドの先頭7コマ）。goldベビー個体の素材。
+// ベビーあくび（3×3グリッドの先頭7コマ）。goldが生成原本。1（green）・2（blue）は
+// tools/recolor.html でgoldから色替えした透過シート（構図・コマは原本と完全一致）。
 loadSheet('./assets/モーション/ニシアフモーション（あくび）.png',
-          dotFrames.gecko.yawn.gold, { cols: 3, rows: 3, count: 7 });
+          dotFrames.gecko.yawn[0].gold, { cols: 3, rows: 3, count: 7 });
+loadSheet('./assets/モーション/ニシアフモーション（あくび）1.png',
+          dotFrames.gecko.yawn[0].green, { cols: 3, rows: 3, count: 7 });
+loadSheet('./assets/モーション/ニシアフモーション（あくび）2.png',
+          dotFrames.gecko.yawn[0].blue, { cols: 3, rows: 3, count: 7 });
+
+// 進化・最終進化のモーション：3色混載シートを tools/process-sheets.html で
+// 行分割・透過化・パレット再構成（白系γ1.35/goldγ1.20）した1行シート。番号は 1=green, 2=blue, 3=gold。
+loadSheet('./assets/モーション/ニシアフ進化あくび1.png', dotFrames.gecko.yawn[1].green, { cols: 7,  rows: 1, count: 7 });
+loadSheet('./assets/モーション/ニシアフ進化あくび2.png', dotFrames.gecko.yawn[1].blue,  { cols: 7,  rows: 1, count: 7 });
+loadSheet('./assets/モーション/ニシアフ進化あくび3.png', dotFrames.gecko.yawn[1].gold,  { cols: 7,  rows: 1, count: 7 });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび1.png', dotFrames.gecko.yawn[2].green, { cols: 10, rows: 1, count: 10 });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび2.png', dotFrames.gecko.yawn[2].blue,  { cols: 10, rows: 1, count: 10 });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dotFrames.gecko.yawn[2].gold,  { cols: 10, rows: 1, count: 10 });
+loadSheet('./assets/モーション/ニシアフ最終進化待機1.png', dotFrames.gecko.idleAnim[2].green, { cols: 11, rows: 1, count: 11 });
+loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFrames.gecko.idleAnim[2].blue,  { cols: 11, rows: 1, count: 11 });
+loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11 });
+
+// スライム待機（青が原本、ピンク・緑は各色イラストのパレットへ変換済み）
+loadSheet('./assets/モーション/スライム待機青.png',     dotFrames.slime.idleAnim.blue,  { cols: 7, rows: 1, count: 7 });
+loadSheet('./assets/モーション/スライム待機ピンク.png', dotFrames.slime.idleAnim.pink,  { cols: 7, rows: 1, count: 7 });
+loadSheet('./assets/モーション/スライム待機緑.png',     dotFrames.slime.idleAnim.green, { cols: 7, rows: 1, count: 7 });
 
 const EGG_DRAW_W = 60; // 卵の描画幅(px)。部屋全体とのバランスで調整
 
@@ -408,10 +451,9 @@ const SPRITES = {
   },
   gecko: {
     stages: [
-      { scale: 0.85 }, // ベビー（画像あり）
-      { scale: 1.0  }, // 第2形態（画像TBD）
-      { scale: 1.2  }, // 第3形態（画像TBD）
-      { scale: 1.42 }, // 最終形態（画像TBD）
+      { scale: 0.85 }, // ベビー（静止idle＋あくび7コマ）
+      { scale: 1.0  }, // 進化（あくび7コマ。idleはあくびコマ0を使用）
+      { scale: 1.25 }, // 最終進化（待機アニメ11コマ＋あくび10コマ）
     ],
   },
 };
@@ -470,42 +512,54 @@ const sparkles = [];
 // ---- スプライト用アイドルアニメーション ----
 const idleAnim = { nextTick: 0, tickEnd: 0, tickType: 0 };
 
-// ---- あくびモーション（スプライト方式・現状goldベビーのみ素材あり）----
-// 数秒ごとに自発的にあくびを1サイクル再生する。タイムラインは大あくびのコマ（4〜6）を
-// 長めに見せて自然な“ふわぁ”感を出す。各 d は秒。
+// ---- あくびモーション（スプライト方式・全ステージ3色対応）----
+// 数秒ごとに自発的にあくびを1サイクル再生する。タイムラインは大あくびのコマを
+// 長めに見せて自然な“ふわぁ”感を出す。各 d は秒。peak のコマでブルブル震える。
 const yawn = { active: false, start: 0, next: 0 };
-const YAWN_PEAK_FRAME = 5; // 口が最大に開くコマ。ここで少し静止しつつブルブル震える
-const YAWN_TIMELINE = [
-  { f: 0, d: 0.07 }, { f: 1, d: 0.08 }, { f: 2, d: 0.10 },
-  { f: 3, d: 0.12 }, { f: 4, d: 0.17 }, { f: 5, d: 0.50 }, { f: 6, d: 0.14 },
+const YAWN_TIMELINES = [
+  { peak: 5, seq: [ // stage 0 ベビー（7コマ）
+    { f: 0, d: 0.07 }, { f: 1, d: 0.08 }, { f: 2, d: 0.10 },
+    { f: 3, d: 0.12 }, { f: 4, d: 0.17 }, { f: 5, d: 1.00 }, { f: 6, d: 0.14 },
+  ]},
+  { peak: 4, seq: [ // stage 1 進化（7コマ）
+    { f: 0, d: 0.07 }, { f: 1, d: 0.08 }, { f: 2, d: 0.12 },
+    { f: 3, d: 0.17 }, { f: 4, d: 1.00 }, { f: 5, d: 0.14 }, { f: 6, d: 0.10 },
+  ]},
+  { peak: 5, seq: [ // stage 2 最終進化（10コマ）
+    { f: 0, d: 0.07 }, { f: 1, d: 0.08 }, { f: 2, d: 0.10 }, { f: 3, d: 0.12 },
+    { f: 4, d: 0.15 }, { f: 5, d: 1.00 }, { f: 6, d: 0.20 },
+    { f: 7, d: 0.12 }, { f: 8, d: 0.10 }, { f: 9, d: 0.08 },
+  ]},
 ];
-const YAWN_TOTAL = YAWN_TIMELINE.reduce((s, k) => s + k.d, 0);
+const yawnTimeline = stage => YAWN_TIMELINES[Math.min(stage, YAWN_TIMELINES.length - 1)];
+const yawnTotal    = stage => yawnTimeline(stage).seq.reduce((s, k) => s + k.d, 0);
 
-function yawnFrameAt(elapsed) {
+function yawnFrameAt(stage, elapsed) {
+  const seq = yawnTimeline(stage).seq;
   let t = 0;
-  for (const k of YAWN_TIMELINE) { if (elapsed < t + k.d) return k.f; t += k.d; }
-  return YAWN_TIMELINE[YAWN_TIMELINE.length - 1].f;
+  for (const k of seq) { if (elapsed < t + k.d) return k.f; t += k.d; }
+  return seq[seq.length - 1].f;
 }
 
 // 現在あくび中なら、表示すべきフレーム画像と基準幅を返す（でなければ null）。
 function currentYawnSet() {
   if (!yawn.active) return null;
-  const set = dotFrames.gecko.yawn[currentPaletteName()];
-  if (!set || !set.frames.length || !set.refW || evolutionStage !== 0) return null;
-  const f = yawnFrameAt(performance.now() / 1000 - yawn.start);
+  const set = yawnSetFor(evolutionStage, currentPaletteName());
+  if (!set || !set.frames.length || !set.refW) return null;
+  const f = yawnFrameAt(evolutionStage, performance.now() / 1000 - yawn.start);
   const img = set.frames[f];
-  return img ? { img, refW: set.refW, frame: f } : null;
+  return img ? { img, refW: set.refW, frame: f, peak: yawnTimeline(evolutionStage).peak } : null;
 }
 
 // あくびのスケジューラ。素材があり待機状態のときだけ周期的に発火させる。
 function updateYawn(now) {
-  const set = dotFrames.gecko.yawn[currentPaletteName()];
+  const set = yawnSetFor(evolutionStage, currentPaletteName());
   const avail = set && set.frames.length && set.refW &&
-                bornPalette && evolutionStage === 0 && !evoActive && !hatchActive;
+                bornPalette && !evoActive && !hatchActive;
   if (!avail) { yawn.active = false; return; }
   if (yawn.next === 0) yawn.next = now + 1.5 + Math.random() * 2; // 初回まで少し待つ（1.5〜3.5秒）
   if (!yawn.active && now >= yawn.next) { yawn.active = true; yawn.start = now; }
-  if (yawn.active && (now - yawn.start) >= YAWN_TOTAL) {
+  if (yawn.active && (now - yawn.start) >= yawnTotal(evolutionStage)) {
     yawn.active = false;
     yawn.next = now + 3 + Math.random() * 4; // 次のあくびまで3〜7秒
   }
@@ -610,6 +664,8 @@ function drawCreatureSprite(now, alpha = 1) {
   // あくびモーション中なら専用フレームを使う（素材があるときのみ）。
   const yset = currentYawnSet();
 
+  const stage = Math.min(evolutionStage, dotFrames.gecko.yawn.length - 1);
+
   let dotImg, dW, dH, anchorX, anchorY, shadowW;
   if (yset) {
     // 全コマ同一サイズの共通キャンバス。コマ0の体幅(refW)を baseW に合わせるので、
@@ -622,19 +678,40 @@ function drawCreatureSprite(now, alpha = 1) {
     anchorY = dH;       // キャンバス下端 = 足元Y
     shadowW = baseW;    // 影は体幅基準で固定（口開け・尻尾で広がらない）
   } else {
-    const frames = dotFrames.gecko.idle[pal];
-    let idx = 0;
-    if (frames) {
-      idx = Math.min(evolutionStage, frames.length - 1);
-      while (idx > 0 && !frames[idx]) idx--;
+    // 待機表示の優先順位：
+    //   1) 待機アニメシート（最終進化）… ゆったりループ再生
+    //   2) あくびシートのコマ0（進化以降）… モーションと柄・色が完全一致する
+    //   3) 静止idle画像（ベビー、またはシート未ロード時のフォールバック）
+    const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
+    const ys = stage >= 1 ? yawnSetFor(stage, pal) : null;
+    if (ia && ia.frames.length && ia.refW) {
+      const IDLE_ANIM_FPS = 6; // 呼吸感のあるゆったりループ
+      dotImg = ia.frames[Math.floor(now * IDLE_ANIM_FPS) % ia.frames.length];
+      const scale = baseW / ia.refW;
+      dW = dotImg.width * scale; dH = dotImg.height * scale;
+      anchorX = dW / 2; anchorY = dH;
+      shadowW = baseW;
+    } else if (ys && ys.frames.length && ys.refW) {
+      dotImg = ys.frames[0];
+      const scale = baseW / ys.refW;
+      dW = dotImg.width * scale; dH = dotImg.height * scale;
+      anchorX = dW / 2; anchorY = dH;
+      shadowW = baseW;
+    } else {
+      const frames = dotFrames.gecko.idle[pal];
+      let idx = 0;
+      if (frames) {
+        idx = Math.min(evolutionStage, frames.length - 1);
+        while (idx > 0 && !frames[idx]) idx--;
+      }
+      dotImg = (frames && frames[idx]) || dotFrames.gecko.idle.gold[0];
+      if (!dotImg) return;
+      const scale = baseW / dotImg.width;
+      dW = dotImg.width * scale; dH = dotImg.height * scale;
+      anchorX = dW / 2;  // 体の中心X
+      anchorY = dH;      // 足元Y（画像の下端）
+      shadowW = dW;
     }
-    dotImg = (frames && frames[idx]) || dotFrames.gecko.idle.gold[0];
-    if (!dotImg) return;
-    const scale = baseW / dotImg.width;
-    dW = dotImg.width * scale; dH = dotImg.height * scale;
-    anchorX = dW / 2;  // 体の中心X
-    anchorY = dH;      // 足元Y（画像の下端）
-    shadowW = dW;
   }
 
   // 影
@@ -642,13 +719,13 @@ function drawCreatureSprite(now, alpha = 1) {
   vctx.globalAlpha = 0.2 * alpha;
   vctx.fillStyle = '#1a1025';
   vctx.beginPath();
-  vctx.ellipse(pivX, pivY + 3, shadowW * 0.4, 5, 0, 0, Math.PI * 2);
+  vctx.ellipse(pivX, pivY, shadowW * 0.4, 5, 0, 0, Math.PI * 2);
   vctx.fill();
   vctx.restore();
 
   // 最大あくびのコマでは静止しつつ小刻みに震える「ブルブル」演出（本体のみ。影は固定）。
   let shakeX = 0, shakeY = 0, shakeRot = 0;
-  if (yset && yset.frame === YAWN_PEAK_FRAME) {
+  if (yset && yset.frame === yset.peak) {
     shakeX   = Math.sin(now * 150) * 0.45;  // 横の小刻み（≒24Hz・速め）
     shakeY   = Math.sin(now * 174) * 0.22;  // 縦は控えめ
     shakeRot = Math.sin(now * 162) * 0.007; // ごく僅かな角度の震え
@@ -676,7 +753,7 @@ function drawEggSprite(now) {
   vctx.globalAlpha = 0.2;
   vctx.fillStyle = '#1a1025';
   vctx.beginPath();
-  vctx.ellipse(pivX, pivY + 3, dW * 0.4, 5, 0, 0, Math.PI * 2);
+  vctx.ellipse(pivX, pivY, dW * 0.4, 5, 0, 0, Math.PI * 2);
   vctx.fill();
   vctx.restore();
   vctx.save();
@@ -1438,13 +1515,13 @@ window.addEventListener('keydown', (e) => {
     bornPalette = null; mutationType = null; evolutionStage = 0;
     savePet(); setStatus('（テスト）卵にもどした');
   } else if (e.key === 'y' || e.key === 'Y') {
-    // （テスト）あくびモーションを即発火（goldベビーのみ素材あり）
-    const set = dotFrames.gecko.yawn[currentPaletteName()];
-    if (set && set.frames.length && evolutionStage === 0 && bornPalette) {
+    // （テスト）あくびモーションを即発火（全ステージ対応）
+    const set = yawnSetFor(evolutionStage, currentPaletteName());
+    if (set && set.frames.length && bornPalette) {
       yawn.active = true; yawn.start = performance.now() / 1000;
       setStatus('（テスト）あくび');
     } else {
-      setStatus('（テスト）あくび素材なし（goldベビーで試して）');
+      setStatus('（テスト）あくび素材なし');
     }
   } else if (e.key === 'b' || e.key === 'B') {
     // 触られたくない場所のテスト（強制ペナルティ発動）

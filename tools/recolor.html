@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>スプライト色替えツール</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 24px; }
+    h2 { color: #50c878; }
+    p.desc { color: #aaa; }
+    label { display: block; margin: 10px 0 4px; }
+    input[type=number] { width: 60px; padding: 4px; }
+    button { padding: 6px 16px; background: #50c878; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: bold; }
+    button.minor { background: #4a4a6a; color: #eee; }
+    .info { color: #aaa; font-size: 12px; margin-top: 6px; }
+    #swatches { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+    .swatch { display: flex; align-items: center; gap: 6px; background: #2a2a4a; border: 2px solid transparent; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+    .swatch.sel { border-color: #ffd24a; }
+    .chip { width: 32px; height: 32px; border-radius: 6px; border: 1px solid #555; display: flex; align-items: center; justify-content: center; color: #888; }
+    .pct { font-size: 11px; color: #aaa; width: 34px; text-align: right; }
+    .pickrow { display: flex; align-items: center; gap: 12px; margin: 12px 0; flex-wrap: wrap; }
+    #panels { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 20px; }
+    .card { background: #2a2a4a; border-radius: 8px; padding: 12px; text-align: center; }
+    .card canvas { display: block; max-width: 380px; background: repeating-conic-gradient(#333 0% 25%, #444 0% 50%) 0 0 / 16px 16px; border-radius: 4px; cursor: crosshair; }
+    .card .cap { margin-bottom: 8px; color: #ffd24a; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>🎨 スプライト色替えツール</h2>
+  <p class="desc">マスター画像の色を自動でグループ分けし、グループごとに別の色へ置き換えます。<br>
+  構図・線・模様は1ピクセルも変わりません。陰影（明暗の階調）も維持されます。</p>
+
+  <label>① マスター画像（色を変えたい画像）：
+    <input type="file" id="fileMaster" accept="image/*">
+  </label>
+  <label>② 色グループ数（多いほど細かく分かれる）：
+    <input type="number" id="kInput" value="6" min="2" max="12">
+    <button id="btnExtract" class="minor">再抽出</button>
+  </label>
+  <label>③ 参照画像（任意。クリックした場所の色を置換色として拾う）：
+    <input type="file" id="fileRef" accept="image/*">
+  </label>
+  <div id="status" class="info">マスター画像を選ぶと色グループを抽出します。元画像をクリックしてもグループを選べます。</div>
+
+  <div id="swatches"></div>
+
+  <div class="pickrow">
+    <span>選択中グループの置換色：</span>
+    <input type="color" id="colorPick" value="#f0c060">
+    <button id="btnClearOne" class="minor">このグループを解除</button>
+    <button id="btnClearAll" class="minor">全部解除</button>
+    <button id="btnDownload">💾 PNGダウンロード</button>
+  </div>
+
+  <div id="panels">
+    <div class="card"><div class="cap">元画像（クリックでグループ選択）</div><canvas id="cvOrig" width="0"></canvas></div>
+    <div class="card"><div class="cap">変換結果</div><canvas id="cvOut" width="0"></canvas></div>
+    <div class="card"><div class="cap">参照画像（クリックで色を拾う）</div><canvas id="cvRef" width="0"></canvas></div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const luma = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const rgbToHex = c => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+    const hexToRgb = s => [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
+
+    let master = null;    // { w, h, src: Uint8ClampedArray, name }
+    let centers = [];     // [{ r, g, b, lum, share }]
+    let repl = [];        // 各グループの置換色: null | [r,g,b]
+    let idx1, idx2, wgt;  // ピクセルごとの近傍2グループと混合比（境界のアンチエイリアスを滑らかに保つ）
+    let selected = -1;
+    let refImg = null;    // { w, h, data }
+
+    function setStatus(msg) { $('status').textContent = msg; }
+
+    function loadImageFile(file, cb) {
+      if (!file) return;
+      const img = new Image();
+      img.onload = () => cb(img, file.name);
+      img.src = URL.createObjectURL(file);
+    }
+
+    $('fileMaster').addEventListener('change', e => loadImageFile(e.target.files[0], setMaster));
+    $('fileRef').addEventListener('change', e => loadImageFile(e.target.files[0], setRef));
+    $('btnExtract').addEventListener('click', extract);
+
+    function setMaster(img, name) {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const id = ctx.getImageData(0, 0, c.width, c.height);
+      master = { w: c.width, h: c.height, src: id.data, name };
+      const cv = $('cvOrig');
+      cv.width = master.w; cv.height = master.h;
+      cv.getContext('2d').putImageData(id, 0, 0);
+      extract();
+    }
+
+    function setRef(img) {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      refImg = { w: c.width, h: c.height, data: ctx.getImageData(0, 0, c.width, c.height).data };
+      const cv = $('cvRef');
+      cv.width = refImg.w; cv.height = refImg.h;
+      cv.getContext('2d').drawImage(img, 0, 0);
+    }
+
+    // ---- k-means（最遠点シード）で代表色を抽出 ----
+    function kmeans(samples, k) {
+      k = Math.min(k, samples.length);
+      const dist2 = (a, b) => { const dr = a[0]-b[0], dg = a[1]-b[1], db = a[2]-b[2]; return dr*dr + dg*dg + db*db; };
+      const cents = [samples[0].slice()];
+      while (cents.length < k) {
+        let best = null, bestD = -1;
+        for (const s of samples) {
+          let dmin = Infinity;
+          for (const c of cents) { const d = dist2(s, c); if (d < dmin) dmin = d; }
+          if (dmin > bestD) { bestD = dmin; best = s; }
+        }
+        cents.push(best.slice());
+      }
+      const assign = new Array(samples.length).fill(0);
+      for (let it = 0; it < 14; it++) {
+        let changed = false;
+        for (let i = 0; i < samples.length; i++) {
+          let bi = 0, bd = Infinity;
+          for (let c = 0; c < cents.length; c++) { const d = dist2(samples[i], cents[c]); if (d < bd) { bd = d; bi = c; } }
+          if (assign[i] !== bi) { assign[i] = bi; changed = true; }
+        }
+        const sum = cents.map(() => [0, 0, 0, 0]);
+        for (let i = 0; i < samples.length; i++) { const s = sum[assign[i]], p = samples[i]; s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3]++; }
+        for (let c = 0; c < cents.length; c++) if (sum[c][3] > 0) { cents[c][0] = sum[c][0]/sum[c][3]; cents[c][1] = sum[c][1]/sum[c][3]; cents[c][2] = sum[c][2]/sum[c][3]; }
+        if (!changed) break;
+      }
+      const counts = cents.map(() => 0);
+      for (const a of assign) counts[a]++;
+      return cents.map((c, i) => [c[0], c[1], c[2], counts[i] / samples.length])
+                  .filter((c, i) => counts[i] > 0)
+                  .sort((a, b) => b[3] - a[3]);
+    }
+
+    function extract() {
+      if (!master) { setStatus('先にマスター画像を選んでください'); return; }
+      const k = clampN(parseInt($('kInput').value) || 6, 2, 12);
+      const t0 = performance.now();
+      const { w, h, src } = master;
+      const total = w * h;
+      const step = Math.max(1, Math.floor(total / 30000));
+      const samples = [];
+      for (let p = 0; p < total; p += step) {
+        if (src[p*4+3] >= 8) samples.push([src[p*4], src[p*4+1], src[p*4+2]]);
+      }
+      if (!samples.length) { setStatus('不透明なピクセルがありません'); return; }
+      centers = kmeans(samples, k).map(c => ({ r: c[0], g: c[1], b: c[2], lum: luma(c[0], c[1], c[2]), share: c[3] }));
+      repl = centers.map(() => null);
+      selected = 0;
+      buildCache();
+      renderSwatches();
+      remap();
+      setStatus(`${w}×${h}px / ${centers.length}グループ抽出（${Math.round(performance.now() - t0)}ms）。スウォッチか元画像クリックでグループを選び、置換色を指定してください。`);
+    }
+
+    // 各ピクセルの近傍2グループと混合比をキャッシュ（置換色の変更時は再計算不要で高速）
+    function buildCache() {
+      const { w, h, src } = master;
+      const n = w * h, K = centers.length;
+      idx1 = new Uint8Array(n); idx2 = new Uint8Array(n); wgt = new Float32Array(n);
+      const cr = centers.map(c => c.r), cg = centers.map(c => c.g), cb = centers.map(c => c.b);
+      for (let p = 0; p < n; p++) {
+        if (src[p*4+3] < 8) { idx1[p] = 255; continue; }
+        const r = src[p*4], g = src[p*4+1], b = src[p*4+2];
+        let b1 = 0, d1 = Infinity, b2 = 0, d2 = Infinity;
+        for (let c = 0; c < K; c++) {
+          const dr = r - cr[c], dg = g - cg[c], db = b - cb[c];
+          const d = dr*dr + dg*dg + db*db;
+          if (d < d1) { d2 = d1; b2 = b1; d1 = d; b1 = c; }
+          else if (d < d2) { d2 = d; b2 = c; }
+        }
+        idx1[p] = b1; idx2[p] = b2;
+        wgt[p] = (d1 + d2) > 0 ? d2 / (d1 + d2) : 1;
+      }
+    }
+
+    // 置換色を適用。各ピクセルは「置換色 × 明度比」で塗るので陰影・ハイライトが残る。
+    function remap() {
+      if (!master || !idx1) return;
+      const { w, h, src } = master;
+      const out = new Uint8ClampedArray(src.length);
+      out.set(src);
+      const n = w * h;
+      for (let p = 0; p < n; p++) {
+        const i1 = idx1[p];
+        if (i1 === 255) continue;
+        const i2 = idx2[p];
+        const r1 = repl[i1], r2 = repl[i2];
+        if (!r1 && !r2) continue;
+        const o = p * 4;
+        const r = src[o], g = src[o+1], b = src[o+2];
+        const Yp = luma(r, g, b);
+        let o1r, o1g, o1b, o2r, o2g, o2b;
+        if (r1) { const t = (Yp + 2) / (centers[i1].lum + 2); o1r = r1[0]*t; o1g = r1[1]*t; o1b = r1[2]*t; }
+        else    { o1r = r; o1g = g; o1b = b; }
+        if (r2) { const t = (Yp + 2) / (centers[i2].lum + 2); o2r = r2[0]*t; o2g = r2[1]*t; o2b = r2[2]*t; }
+        else    { o2r = r; o2g = g; o2b = b; }
+        const wA = wgt[p];
+        out[o]   = o1r * wA + o2r * (1 - wA);
+        out[o+1] = o1g * wA + o2g * (1 - wA);
+        out[o+2] = o1b * wA + o2b * (1 - wA);
+      }
+      const cv = $('cvOut');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
+    }
+
+    function renderSwatches() {
+      const box = $('swatches');
+      box.innerHTML = '';
+      centers.forEach((c, i) => {
+        const el = document.createElement('div');
+        el.className = 'swatch' + (i === selected ? ' sel' : '');
+        const orig = `rgb(${c.r|0},${c.g|0},${c.b|0})`;
+        const rep  = repl[i] ? `background:rgb(${repl[i].map(Math.round)})` : '';
+        el.innerHTML = `<div class="chip" style="background:${orig}"></div><div>→</div>` +
+                       `<div class="chip" style="${rep}">${repl[i] ? '' : '—'}</div>` +
+                       `<div class="pct">${Math.round(c.share * 100)}%</div>`;
+        el.onclick = () => {
+          selected = i;
+          if (repl[i]) $('colorPick').value = rgbToHex(repl[i]);
+          renderSwatches();
+        };
+        box.appendChild(el);
+      });
+    }
+
+    // 元画像クリック → そのピクセルのグループを選択
+    $('cvOrig').addEventListener('click', e => {
+      if (!master || !idx1) return;
+      const rect = e.target.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * master.w / rect.width);
+      const y = Math.floor((e.clientY - rect.top) * master.h / rect.height);
+      const p = y * master.w + x;
+      if (p < 0 || p >= master.w * master.h || idx1[p] === 255) return;
+      selected = idx1[p];
+      if (repl[selected]) $('colorPick').value = rgbToHex(repl[selected]);
+      renderSwatches();
+    });
+
+    // 参照画像クリック → 選択中グループの置換色として拾う
+    $('cvRef').addEventListener('click', e => {
+      if (!refImg || selected < 0) return;
+      const rect = e.target.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * refImg.w / rect.width);
+      const y = Math.floor((e.clientY - rect.top) * refImg.h / rect.height);
+      const o = (y * refImg.w + x) * 4;
+      if (refImg.data[o+3] < 8) return;
+      repl[selected] = [refImg.data[o], refImg.data[o+1], refImg.data[o+2]];
+      $('colorPick').value = rgbToHex(repl[selected]);
+      renderSwatches();
+      remap();
+    });
+
+    $('colorPick').addEventListener('input', e => {
+      if (selected < 0) return;
+      repl[selected] = hexToRgb(e.target.value);
+      renderSwatches();
+      remap();
+    });
+
+    $('btnClearOne').addEventListener('click', () => {
+      if (selected < 0) return;
+      repl[selected] = null;
+      renderSwatches();
+      remap();
+    });
+
+    $('btnClearAll').addEventListener('click', () => {
+      repl = centers.map(() => null);
+      renderSwatches();
+      remap();
+    });
+
+    $('btnDownload').addEventListener('click', () => {
+      if (!master) return;
+      const a = document.createElement('a');
+      a.download = master.name.replace(/\.[^.]+$/, '') + '-recolor.png';
+      a.href = $('cvOut').toDataURL('image/png');
+      a.click();
+    });
+  </script>
+</body>
+</html>

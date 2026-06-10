@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>モーションシート一括処理</title>
+<style>
+  body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+  h2 { color: #50c878; }
+  #log { white-space: pre-wrap; font-size: 12px; color: #aaa; margin: 10px 0; }
+  .out { margin: 10px 0; }
+  .out canvas { max-width: 100%; background: repeating-conic-gradient(#333 0% 25%, #444 0% 50%) 0 0 / 16px 16px; display: block; margin-top: 4px; }
+  .cap { color: #ffd24a; font-weight: bold; font-size: 13px; }
+</style>
+</head>
+<body>
+<h2>🎞 モーションシート一括処理</h2>
+<p>3色×Nコマの混載シートを行ごとに分割し、背景透過＋クリーンアップ＋パレット再構成（ガンマ付き）して1行シートとして保存する。</p>
+<div id="log"></div>
+<div id="outs"></div>
+<script>
+const log = msg => { document.getElementById('log').textContent += msg + '\n'; };
+const SAVE = 'http://localhost:35799/save';
+
+// ---- 基本ユーティリティ ----
+function loadImg(url) {
+  return new Promise((ok, ng) => {
+    const img = new Image();
+    img.onload = () => ok(img);
+    img.onerror = ng;
+    img.src = encodeURI(url) + '?v=' + Date.now();
+  });
+}
+function imgData(img) {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  return { w: c.width, h: c.height, d: ctx.getImageData(0, 0, c.width, c.height).data };
+}
+const dist2 = (r1,g1,b1,r2,g2,b2) => (r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2;
+const lumOf = (r,g,b) => 0.2126*r + 0.7152*g + 0.0722*b;
+
+function bgColorOf(d, w, h) {
+  const pts = [[2,2],[w-3,2],[2,h-3],[w-3,h-3]];
+  let r=0,g=0,b=0;
+  for (const [x,y] of pts) { const i=(y*w+x)*4; r+=d[i]; g+=d[i+1]; b+=d[i+2]; }
+  return [r/4, g/4, b/4];
+}
+
+// 内容のある横帯（行）を検出。gapMerge px 以下の隙間は同一帯として結合。
+function detectBands(d, w, h, bg, gapMerge = 6) {
+  const has = new Uint8Array(h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x += 2) {
+      const i = (y*w+x)*4;
+      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > 60*60) { has[y] = 1; break; }
+    }
+  }
+  const bands = [];
+  let y0 = -1, gap = 0;
+  for (let y = 0; y < h; y++) {
+    if (has[y]) { if (y0 < 0) y0 = y; gap = 0; }
+    else if (y0 >= 0 && ++gap > gapMerge) { bands.push({ y0, y1: y - gap }); y0 = -1; }
+  }
+  if (y0 >= 0) bands.push({ y0, y1: h - 1 });
+  return bands;
+}
+
+// 帯内の内容のある縦列レンジ（スライムの不等間隔グリッド用）
+function detectCols(d, w, bg, band, gapMerge = 8) {
+  const has = new Uint8Array(w);
+  for (let x = 0; x < w; x++) {
+    for (let y = band.y0; y <= band.y1; y += 2) {
+      const i = (y*w+x)*4;
+      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > 60*60) { has[x] = 1; break; }
+    }
+  }
+  const cols = [];
+  let x0 = -1, gap = 0;
+  for (let x = 0; x < w; x++) {
+    if (has[x]) { if (x0 < 0) x0 = x; gap = 0; }
+    else if (x0 >= 0 && ++gap > gapMerge) { cols.push({ x0, x1: x - gap }); x0 = -1; }
+  }
+  if (x0 >= 0) cols.push({ x0, x1: w - 1 });
+  return cols;
+}
+
+function floodRemove(d, w, h, tol) {
+  for (const [sx, sy] of [[0,0],[w-1,0],[0,h-1],[w-1,h-1]]) {
+    const si = (sy*w+sx)*4;
+    if (d[si+3] === 0) continue;
+    const r = d[si], g = d[si+1], b = d[si+2];
+    const vis = new Uint8Array(w*h);
+    const stk = [sx, sy];
+    while (stk.length) {
+      const y = stk.pop(), x = stk.pop();
+      if (x<0||x>=w||y<0||y>=h) continue;
+      const idx = y*w+x;
+      if (vis[idx]) continue;
+      vis[idx] = 1;
+      const i = idx*4;
+      if (d[i+3] === 0) { stk.push(x-1,y,x+1,y,x,y-1,x,y+1); continue; }
+      if (dist2(d[i],d[i+1],d[i+2],r,g,b) <= tol*tol) { d[i+3] = 0; stk.push(x-1,y,x+1,y,x,y-1,x,y+1); }
+    }
+  }
+}
+
+function keepLargest(d, w, h) {
+  const vis = new Uint8Array(w*h);
+  let best = null;
+  for (let s = 0; s < w*h; s++) {
+    if (vis[s] || d[s*4+3] < 30) { vis[s] = 1; continue; }
+    const pixels = [], stk = [s];
+    while (stk.length) {
+      const p = stk.pop();
+      if (p < 0 || p >= w*h || vis[p]) continue;
+      vis[p] = 1;
+      if (d[p*4+3] < 30) continue;
+      pixels.push(p);
+      const x = p % w, y = (p / w) | 0;
+      if (x > 0) stk.push(p-1); if (x < w-1) stk.push(p+1);
+      if (y > 0) stk.push(p-w); if (y < h-1) stk.push(p+w);
+    }
+    if (pixels.length && (!best || pixels.length > best.length)) best = pixels;
+  }
+  const keep = new Uint8Array(w*h);
+  if (best) for (const p of best) keep[p] = 1;
+  for (let p = 0; p < w*h; p++) if (!keep[p]) d[p*4+3] = 0;
+}
+
+function opaquePct(d, w, h) {
+  let n = 0;
+  for (let p = 0; p < w*h; p++) if (d[p*4+3] > 30) n++;
+  return n / (w*h);
+}
+
+// 接地影の除去：下端中央付近の最下段の不透明ピクセルをシードに影色をフラッドフィルで消す
+// （split-chars.html と同じ方式）。その後、切り離された島を掃除。
+function removeShadow(d, w, h, tol = 55) {
+  outer:
+  for (let y = h - 1; y >= Math.floor(h * 0.7); y--) {
+    for (const dx of [0, -8, 8, -16, 16]) {
+      const x = Math.floor(w / 2) + dx;
+      if (x < 0 || x >= w) continue;
+      if (d[(y*w+x)*4+3] > 30) {
+        const si = (y*w+x)*4;
+        const r = d[si], g = d[si+1], b = d[si+2];
+        const vis = new Uint8Array(w*h);
+        const stk = [x, y];
+        while (stk.length) {
+          const yy = stk.pop(), xx = stk.pop();
+          if (xx<0||xx>=w||yy<0||yy>=h) continue;
+          const idx = yy*w+xx;
+          if (vis[idx]) continue;
+          vis[idx] = 1;
+          const i = idx*4;
+          if (d[i+3] === 0) continue;
+          if (dist2(d[i],d[i+1],d[i+2],r,g,b) <= tol*tol) { d[i+3] = 0; stk.push(xx-1,yy,xx+1,yy,xx,yy-1,xx,yy+1); }
+        }
+        break outer;
+      }
+    }
+  }
+  keepLargest(d, w, h);
+}
+
+// セルを切り出して背景除去＋最大成分抽出。tolは自己検証式：
+// 65で除去した結果が30での結果より大きく減る（=体まで食った）なら30を採用。
+function cleanCell(srcD, srcW, x0, y0, cw, ch) {
+  const make = tol => {
+    const c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    const ctx = c.getContext('2d');
+    const id = ctx.createImageData(cw, ch);
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const si = ((y0+y)*srcW + x0+x)*4, di = (y*cw+x)*4;
+      id.data[di] = srcD[si]; id.data[di+1] = srcD[si+1]; id.data[di+2] = srcD[si+2]; id.data[di+3] = srcD[si+3];
+    }
+    floodRemove(id.data, cw, ch, tol);
+    keepLargest(id.data, cw, ch);
+    return id;
+  };
+  const a = make(65), b = make(30);
+  const pa = opaquePct(a.data, cw, ch), pb = opaquePct(b.data, cw, ch);
+  const id = (pb - pa > 0.06) ? b : a; // 6pt以上差があれば65は食いすぎ
+  const c = document.createElement('canvas');
+  c.width = cw; c.height = ch;
+  c.getContext('2d').putImageData(id, 0, 0);
+  return { canvas: c, data: id.data, tolUsed: (pb - pa > 0.06) ? 30 : 65 };
+}
+
+// ---- k-means（最遠点シード・決定的）----
+function kmeans(samples, k) {
+  k = Math.min(k, samples.length);
+  const d2 = (a, b) => (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2;
+  const cents = [samples[0].slice()];
+  while (cents.length < k) {
+    let best = null, bestD = -1;
+    for (const s of samples) {
+      let dm = Infinity;
+      for (const c of cents) { const v = d2(s, c); if (v < dm) dm = v; }
+      if (dm > bestD) { bestD = dm; best = s; }
+    }
+    cents.push(best.slice());
+  }
+  const assign = new Array(samples.length).fill(0);
+  for (let it = 0; it < 14; it++) {
+    let changed = false;
+    for (let i = 0; i < samples.length; i++) {
+      let bi = 0, bd = Infinity;
+      for (let c = 0; c < cents.length; c++) { const v = d2(samples[i], cents[c]); if (v < bd) { bd = v; bi = c; } }
+      if (assign[i] !== bi) { assign[i] = bi; changed = true; }
+    }
+    const sum = cents.map(() => [0,0,0,0]);
+    for (let i = 0; i < samples.length; i++) { const s = sum[assign[i]], p = samples[i]; s[0]+=p[0]; s[1]+=p[1]; s[2]+=p[2]; s[3]++; }
+    for (let c = 0; c < cents.length; c++) if (sum[c][3] > 0) { cents[c][0]=sum[c][0]/sum[c][3]; cents[c][1]=sum[c][1]/sum[c][3]; cents[c][2]=sum[c][2]/sum[c][3]; }
+    if (!changed) break;
+  }
+  const counts = cents.map(() => 0);
+  for (const a of assign) counts[a]++;
+  return cents.filter((c, i) => counts[i] > 0);
+}
+
+function sampleFrames(frames, maxN = 30000) {
+  const all = [];
+  for (const f of frames) {
+    const { data: d } = f.canvas.getContext('2d').getImageData(0, 0, f.canvas.width, f.canvas.height);
+    for (let p = 0; p < f.canvas.width * f.canvas.height; p += 3) {
+      if (d[p*4+3] >= 8) all.push([d[p*4], d[p*4+1], d[p*4+2]]);
+    }
+  }
+  const step = Math.max(1, Math.floor(all.length / maxN));
+  return all.filter((_, i) => i % step === 0);
+}
+
+const gammaC = (c, g) => [255*Math.pow(c[0]/255,g), 255*Math.pow(c[1]/255,g), 255*Math.pow(c[2]/255,g)];
+
+// フレーム群をパレット再構成：targets[i] = クラスタiの置換色。
+// 各ピクセルは近傍2クラスタの「置換色×明度比」をソフトブレンド（既存ツールと同じ方式）。
+function remapFrames(frames, centers, targets) {
+  const K = centers.length;
+  const clum = centers.map(c => lumOf(c[0], c[1], c[2]));
+  for (const f of frames) {
+    const w = f.canvas.width, h = f.canvas.height;
+    const ctx = f.canvas.getContext('2d');
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    for (let p = 0; p < w*h; p++) {
+      if (d[p*4+3] < 8) continue;
+      const r = d[p*4], g = d[p*4+1], b = d[p*4+2];
+      let b1 = 0, d1 = Infinity, b2 = 0, dd2 = Infinity;
+      for (let c = 0; c < K; c++) {
+        const v = dist2(r, g, b, centers[c][0], centers[c][1], centers[c][2]);
+        if (v < d1) { dd2 = d1; b2 = b1; d1 = v; b1 = c; }
+        else if (v < dd2) { dd2 = v; b2 = c; }
+      }
+      const wA = (d1 + dd2) > 0 ? dd2 / (d1 + dd2) : 1;
+      const Yp = lumOf(r, g, b);
+      const t1 = (Yp + 2) / (clum[b1] + 2), t2 = (Yp + 2) / (clum[b2] + 2);
+      d[p*4]   = Math.min(255, targets[b1][0]*t1*wA + targets[b2][0]*t2*(1-wA));
+      d[p*4+1] = Math.min(255, targets[b1][1]*t1*wA + targets[b2][1]*t2*(1-wA));
+      d[p*4+2] = Math.min(255, targets[b1][2]*t1*wA + targets[b2][2]*t2*(1-wA));
+    }
+    ctx.putImageData(id, 0, 0);
+  }
+}
+
+// フレーム群を1行シートに合成（セル=最大bbox+8、中央・下端寄せ）
+function composeSheet(frames) {
+  const boxes = frames.map(f => {
+    const w = f.canvas.width, h = f.canvas.height;
+    const d = f.canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    let minX=w, maxX=-1, minY=h, maxY=-1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (d[(y*w+x)*4+3] > 0) {
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+      }
+    }
+    return { minX, minY, bw: maxX-minX+1, bh: maxY-minY+1 };
+  });
+  const cellW = Math.max(...boxes.map(b => b.bw)) + 8;
+  const cellH = Math.max(...boxes.map(b => b.bh)) + 8;
+  const out = document.createElement('canvas');
+  out.width = cellW * frames.length; out.height = cellH;
+  const ctx = out.getContext('2d');
+  frames.forEach((f, i) => {
+    const b = boxes[i];
+    ctx.drawImage(f.canvas, b.minX, b.minY, b.bw, b.bh,
+                  i*cellW + Math.round((cellW-b.bw)/2), cellH - 4 - b.bh, b.bw, b.bh);
+  });
+  return out;
+}
+
+async function saveCanvas(canvas, name, caption) {
+  const div = document.createElement('div');
+  div.className = 'out';
+  div.innerHTML = `<div class="cap">${caption}</div>`;
+  div.appendChild(canvas);
+  document.getElementById('outs').appendChild(div);
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+  const res = await fetch(`${SAVE}?dir=${encodeURIComponent('モーション')}&name=${encodeURIComponent(name)}`, { method: 'POST', body: blob });
+  return `${await res.text()} (${Math.round(blob.size/1024)}KB)`;
+}
+
+// ---- ニシアフ系：3行（行=色）×Nコマのシートを処理 ----
+async function processGeckoSheet(src, cols, outDefs) {
+  log(`--- ${src} ---`);
+  const img = await loadImg(src);
+  const { w, h, d } = imgData(img);
+  const bg = bgColorOf(d, w, h);
+  let bands = detectBands(d, w, h, bg);
+  log(`size ${w}x${h} / bands: ${bands.map(b => `${b.y0}-${b.y1}`).join(', ')}`);
+  // 番号ヘッダー等の細い帯を除き、高い順に3本→y順
+  bands = bands.sort((a, b) => (b.y1-b.y0) - (a.y1-a.y0)).slice(0, 3).sort((a, b) => a.y0 - b.y0);
+  const results = [];
+  for (const def of outDefs) {
+    const band = bands[def.row];
+    const pad = 6;
+    const y0 = Math.max(0, band.y0 - pad), y1 = Math.min(h - 1, band.y1 + pad);
+    const cellW = Math.floor(w / cols), ch = y1 - y0 + 1;
+    const frames = [], tols = [];
+    for (let i = 0; i < cols; i++) {
+      const cell = cleanCell(d, w, i*cellW, y0, cellW, ch);
+      frames.push(cell); tols.push(cell.tolUsed);
+    }
+    const samples = sampleFrames(frames);
+    const centers = kmeans(samples, 12);
+    const targets = centers.map(c => gammaC(c, def.gamma));
+    remapFrames(frames, centers, targets);
+    const sheet = composeSheet(frames);
+    const r = await saveCanvas(sheet, def.name, `${def.name}（tol: ${tols.join(',')}）`);
+    log(`${def.name}: ${r}`);
+    results.push(def.name);
+  }
+  return results;
+}
+
+// ---- スライム：不等間隔グリッド＋参照画像から色変換 ----
+async function refPalette(src, k) {
+  const img = await loadImg(src);
+  const { w, h, d } = imgData(img);
+  const copy = new Uint8ClampedArray(d);
+  floodRemove(copy, w, h, 30); // ピンクは背景と近いので控えめtol
+  keepLargest(copy, w, h);
+  removeShadow(copy, w, h); // 接地影は色サンプルに入れない
+  const samples = [];
+  for (let p = 0; p < w*h; p += 3) if (copy[p*4+3] >= 8) samples.push([copy[p*4], copy[p*4+1], copy[p*4+2]]);
+  const step = Math.max(1, Math.floor(samples.length / 20000));
+  return kmeans(samples.filter((_, i) => i % step === 0), k);
+}
+
+async function processSlime() {
+  log('--- スライム待機モーション ---');
+  const img = await loadImg('/renderer/assets/モーション/スライム待機モーション.png');
+  const { w, h, d } = imgData(img);
+  const bg = bgColorOf(d, w, h);
+  let bands = detectBands(d, w, h, bg);
+  log(`size ${w}x${h} / bands: ${bands.map(b => `${b.y0}-${b.y1}`).join(', ')}`);
+  const maxH = Math.max(...bands.map(b => b.y1 - b.y0));
+  bands = bands.filter(b => (b.y1 - b.y0) > maxH * 0.4).slice(0, 2);
+  const frames = [];
+  for (const band of bands) {
+    const cols = detectCols(d, w, bg, band);
+    log(`band ${band.y0}-${band.y1}: ${cols.length} cols`);
+    for (const col of cols) {
+      const pad = 6;
+      const x0 = Math.max(0, col.x0 - pad), x1 = Math.min(w - 1, col.x1 + pad);
+      const y0 = Math.max(0, band.y0 - pad), y1 = Math.min(h - 1, band.y1 + pad);
+      const cell = cleanCell(d, w, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      removeShadow(cell.data, cell.canvas.width, cell.canvas.height);
+      cell.canvas.getContext('2d').putImageData(
+        new ImageData(cell.data, cell.canvas.width, cell.canvas.height), 0, 0);
+      frames.push(cell);
+    }
+  }
+  log(`フレーム数: ${frames.length}`);
+  const samples = sampleFrames(frames);
+  const K = 8;
+  const blueCenters = kmeans(samples, K).sort((a, b) => lumOf(...a) - lumOf(...b));
+  // 青はそのまま再構成、ピンク・緑は参照画像のパレットへ明度ランク対応で変換
+  const jobs = [
+    { name: 'スライム待機青.png',     targets: blueCenters },
+    { name: 'スライム待機ピンク.png', targets: (await refPalette('/renderer/assets/スライム/スライムピンク.png', K)).sort((a, b) => lumOf(...a) - lumOf(...b)) },
+    { name: 'スライム待機緑.png',     targets: (await refPalette('/renderer/assets/スライム/スライム緑.png', K)).sort((a, b) => lumOf(...a) - lumOf(...b)) },
+  ];
+  const results = [];
+  for (const job of jobs) {
+    // 元フレームを毎回コピーして変換（青→各色）
+    const copies = frames.map(f => {
+      const c = document.createElement('canvas');
+      c.width = f.canvas.width; c.height = f.canvas.height;
+      c.getContext('2d').drawImage(f.canvas, 0, 0);
+      return { canvas: c };
+    });
+    const tg = job.targets.length === K ? job.targets : blueCenters; // 安全側
+    remapFrames(copies, blueCenters, tg);
+    const sheet = composeSheet(copies);
+    const r = await saveCanvas(sheet, job.name, job.name);
+    log(`${job.name}: ${r}`);
+    results.push(job.name);
+  }
+  return results;
+}
+
+window.runAll = async () => {
+  const out = [];
+  out.push(...await processGeckoSheet('/renderer/assets/モーション/ニシアフ進化　あくびモーション.png', 7, [
+    { row: 0, gamma: 1.35, name: 'ニシアフ進化あくび1.png' },
+    { row: 1, gamma: 1.35, name: 'ニシアフ進化あくび2.png' },
+    { row: 2, gamma: 1.20, name: 'ニシアフ進化あくび3.png' },
+  ]));
+  out.push(...await processGeckoSheet('/renderer/assets/モーション/ニシアフ最終進化　待機モーション.png', 11, [
+    { row: 0, gamma: 1.35, name: 'ニシアフ最終進化待機1.png' },
+    { row: 1, gamma: 1.35, name: 'ニシアフ最終進化待機2.png' },
+    { row: 2, gamma: 1.20, name: 'ニシアフ最終進化待機3.png' },
+  ]));
+  out.push(...await processGeckoSheet('/renderer/assets/モーション/ニシアフ最終進化　あくびモーション.png', 10, [
+    { row: 0, gamma: 1.35, name: 'ニシアフ最終進化あくび1.png' },
+    { row: 1, gamma: 1.35, name: 'ニシアフ最終進化あくび2.png' },
+    { row: 2, gamma: 1.20, name: 'ニシアフ最終進化あくび3.png' },
+  ]));
+  out.push(...await processSlime());
+  log('=== 完了 ===');
+  return out;
+};
+</script>
+</body>
+</html>
