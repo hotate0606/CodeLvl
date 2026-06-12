@@ -48,12 +48,13 @@ function bgColorOf(d, w, h) {
 }
 
 // 内容のある横帯（行）を検出。gapMerge px 以下の隙間は同一帯として結合。
-function detectBands(d, w, h, bg, gapMerge = 6) {
+// thresh: 背景との色距離のしきい値。淡い翼膜（距離30〜45）を拾うには20程度まで下げる。
+function detectBands(d, w, h, bg, gapMerge = 6, thresh = 60) {
   const has = new Uint8Array(h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x += 2) {
       const i = (y*w+x)*4;
-      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > 60*60) { has[y] = 1; break; }
+      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > thresh*thresh) { has[y] = 1; break; }
     }
   }
   const bands = [];
@@ -66,13 +67,13 @@ function detectBands(d, w, h, bg, gapMerge = 6) {
   return bands;
 }
 
-// 帯内の内容のある縦列レンジ（スライムの不等間隔グリッド用）
-function detectCols(d, w, bg, band, gapMerge = 8) {
+// 帯内の内容のある縦列レンジ
+function detectCols(d, w, bg, band, gapMerge = 8, thresh = 60) {
   const has = new Uint8Array(w);
   for (let x = 0; x < w; x++) {
     for (let y = band.y0; y <= band.y1; y += 2) {
       const i = (y*w+x)*4;
-      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > 60*60) { has[x] = 1; break; }
+      if (d[i+3] > 30 && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) > thresh*thresh) { has[x] = 1; break; }
     }
   }
   const cols = [];
@@ -102,6 +103,113 @@ function floodRemove(d, w, h, tol) {
       if (d[i+3] === 0) { stk.push(x-1,y,x+1,y,x,y-1,x,y+1); continue; }
       if (dist2(d[i],d[i+1],d[i+2],r,g,b) <= tol*tol) { d[i+3] = 0; stk.push(x-1,y,x+1,y,x,y-1,x,y+1); }
     }
+  }
+}
+
+// 背景に落ちた「影」判定：色相が背景と同じで暗いだけ（pixel ≈ bg × k）のピクセル。
+// 接地のドロップシャドウや翼が背景に落とす影はこれに合致する。
+// 単体では腹・尻尾のクリームも僅かに合致しうるため、必ず「外側からのフラッド＋
+// 輝度ゲート（暗い輪郭線を通過できない）」と組み合わせて使う。
+function isBgShade(r, g, b, bg, maxErr = 26, kMin = 0.60, kMax = 1.06) {
+  const k = (r/bg[0] + g/bg[1] + b/bg[2]) / 3;
+  if (k < kMin || k > kMax) return false;
+  const er = r - bg[0]*k, eg = g - bg[1]*k, eb = b - bg[2]*k;
+  return er*er + eg*eg + eb*eb <= maxErr*maxErr;
+}
+
+// 全周＋ギャップ列シードの背景除去（基本判定のみ＝個体を傷つけない安全な除去）。
+// 影は色空間では体の明色と分離できないため、ここでは消さず後段の幾何学的処理
+// （shadePeel＝薄いフチ用 / removeShadowPockets＝接地影用）に任せる。
+function floodRemoveBorder(d, w, h, bg, tol, cols = 0) {
+  const vis = new Uint8Array(w*h);
+  const stk = [];
+  for (let x = 0; x < w; x++) { stk.push(x, 0, x, h-1); }
+  for (let y = 0; y < h; y++) { stk.push(0, y, w-1, y); }
+  if (cols > 1) {
+    const cellW = w / cols;
+    for (let k = 1; k < cols; k++) {
+      const gx = Math.round(k * cellW);
+      for (let dx = -4; dx <= 4; dx++) {
+        const x = gx + dx; if (x < 0 || x >= w) continue;
+        for (let y = 0; y < h; y += 3) stk.push(x, y);
+      }
+    }
+  }
+  while (stk.length) {
+    const y = stk.pop(), x = stk.pop();
+    if (x < 0 || x >= w || y < 0 || y >= h) continue;
+    const p = y*w+x;
+    if (vis[p]) continue;
+    vis[p] = 1;
+    const i = p*4;
+    if (d[i+3] === 0) { stk.push(x-1,y,x+1,y,x,y-1,x,y+1); continue; }
+    if (dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) <= tol*tol) {
+      d[i+3] = 0; stk.push(x-1,y,x+1,y,x,y-1,x,y+1);
+    }
+  }
+}
+
+// ===== インク（暗い輪郭線）トポロジーによる内外判定 =====
+// この絵柄はキャラ全体が暗い輪郭線で必ず縁取られている。体内には背景と同色の
+// ピクセル（尻尾のクリーム帯など）が実在するため色では内外を判定できない。
+// そこで「インクの閉リングの外＝色を問わず全部除去 / 中＝無条件保護」とする。
+// 背景・接地影・翼の落ち影・罫線はすべて輪郭の外にあるので一括で消える。
+function inkBoundaryRemove(d, w, h, bg, cols = 0) {
+  const n = w*h;
+  // インクマスク（輝度<175の不透明）を1px膨張 → フラッドの壁。
+  // 175 は淡い輪郭ストロークとそのAAまで拾う（壁＝保護側なので広めに取って安全）。
+  const ink = new Uint8Array(n);
+  for (let p = 0; p < n; p++) {
+    if (d[p*4+3] === 0) continue;
+    const lum = 0.2126*d[p*4] + 0.7152*d[p*4+1] + 0.0722*d[p*4+2];
+    if (lum < 175) ink[p] = 1;
+  }
+  const wall = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!ink[y*w+x]) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const xx = x+dx, yy = y+dy;
+      if (xx >= 0 && xx < w && yy >= 0 && yy < h) wall[yy*w+xx] = 1;
+    }
+  }
+  // 外側フラッド：全周シードのみ。壁以外なら色を問わず進む（ビネットも罫線も影も貫通）。
+  // 注意：グリッド境界列への内部プローブは禁止 — 個体の尻尾・翼がセル境界を越えて
+  // いる場合、プローブが体内に「外側」シードを打ち込み体に穴を開ける（実際に起きた）。
+  const outside = new Uint8Array(n);
+  const stk = [];
+  for (let x = 0; x < w; x++) { stk.push(x, 0, x, h-1); }
+  for (let y = 0; y < h; y++) { stk.push(0, y, w-1, y); }
+  while (stk.length) {
+    const y = stk.pop(), x = stk.pop();
+    if (x < 0 || x >= w || y < 0 || y >= h) continue;
+    const p = y*w+x;
+    if (outside[p] || wall[p]) continue;
+    outside[p] = 1;
+    stk.push(x-1,y, x+1,y, x,y-1, x,y+1);
+  }
+  for (let p = 0; p < n; p++) if (outside[p]) d[p*4+3] = 0;
+  // 注意：インクに囲まれた領域（尻尾と体の隙間等）は背景色でも除去しない。
+  // 体内に背景同色のピクセル（クリーム帯・翼膜）が実在するため、色で区別すると
+  // 必ず体に穴が開く。閉領域の背景残りは軽微な見た目コストとして許容する。
+}
+
+// 指定サイズ未満の孤立成分を捨てる（影除去後に残る浮き滓の掃除）
+function dropSmallComponents(d, w, h, minPx = 400) {
+  const vis = new Uint8Array(w*h);
+  for (let s = 0; s < w*h; s++) {
+    if (vis[s] || d[s*4+3] < 30) { vis[s] = 1; continue; }
+    const px = [], stk = [s];
+    while (stk.length) {
+      const p = stk.pop();
+      if (p < 0 || p >= w*h || vis[p]) continue;
+      vis[p] = 1;
+      if (d[p*4+3] < 30) continue;
+      px.push(p);
+      const x = p % w, y = (p / w) | 0;
+      if (x > 0) stk.push(p-1); if (x < w-1) stk.push(p+1);
+      if (y > 0) stk.push(p-w); if (y < h-1) stk.push(p+w);
+    }
+    if (px.length && px.length < minPx) for (const p of px) d[p*4+3] = 0;
   }
 }
 
@@ -136,7 +244,13 @@ function opaquePct(d, w, h) {
 
 // 接地影の除去：下端中央付近の最下段の不透明ピクセルをシードに影色をフラッドフィルで消す
 // （split-chars.html と同じ方式）。その後、切り離された島を掃除。
+// 安全弁：背景除去の時点で影が既に消えているとシードが体（腹・胸）を掴んでしまうため、
+// 除去ピクセルの1割以上が「体の上部（バウンディングボックス上側70%）」に及ぶ場合は
+// 影ではなく体を食ったと判断して中止する。影は足元より下にしかないので誤爆しない。
 function removeShadow(d, w, h, tol = 55) {
+  let minY = h, maxY = -1;
+  for (let p = 0; p < w*h; p++) if (d[p*4+3] > 30) { const y = (p / w) | 0; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  const upperLimit = minY + (maxY - minY) * 0.7;
   outer:
   for (let y = h - 1; y >= Math.floor(h * 0.7); y--) {
     for (const dx of [0, -8, 8, -16, 16]) {
@@ -146,6 +260,7 @@ function removeShadow(d, w, h, tol = 55) {
         const si = (y*w+x)*4;
         const r = d[si], g = d[si+1], b = d[si+2];
         const vis = new Uint8Array(w*h);
+        const removed = [];
         const stk = [x, y];
         while (stk.length) {
           const yy = stk.pop(), xx = stk.pop();
@@ -155,7 +270,12 @@ function removeShadow(d, w, h, tol = 55) {
           vis[idx] = 1;
           const i = idx*4;
           if (d[i+3] === 0) continue;
-          if (dist2(d[i],d[i+1],d[i+2],r,g,b) <= tol*tol) { d[i+3] = 0; stk.push(xx-1,yy,xx+1,yy,xx,yy-1,xx,yy+1); }
+          if (dist2(d[i],d[i+1],d[i+2],r,g,b) <= tol*tol) { removed.push(idx); stk.push(xx-1,yy,xx+1,yy,xx,yy-1,xx,yy+1); }
+        }
+        let upper = 0;
+        for (const idx of removed) if (((idx / w) | 0) < upperLimit) upper++;
+        if (removed.length === 0 || upper / removed.length < 0.10) {
+          for (const idx of removed) d[idx*4+3] = 0;
         }
         break outer;
       }
@@ -187,6 +307,218 @@ function cleanCell(srcD, srcW, x0, y0, cw, ch) {
   c.width = cw; c.height = ch;
   c.getContext('2d').putImageData(id, 0, 0);
   return { canvas: c, data: id.data, tolUsed: (pb - pa > 0.06) ? 30 : 65 };
+}
+
+// 透明部に接した背景近似色ピクセルを繰り返し剥がす（低tolフラッドの取り残しハロ対策）。
+// 内部のピクセルは透明に接しないので食われない。
+function erodeHalo(d, w, h, bg, tol = 26, iters = 8) {
+  for (let it = 0; it < iters; it++) {
+    let changed = false;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y*w+x)*4;
+      if (d[i+3] === 0) continue;
+      const adj = (x > 0 && d[i-4+3] === 0) || (x < w-1 && d[i+4+3] === 0) ||
+                  (y > 0 && d[((y-1)*w+x)*4+3] === 0) || (y < h-1 && d[((y+1)*w+x)*4+3] === 0);
+      if (adj && dist2(d[i],d[i+1],d[i+2],bg[0],bg[1],bg[2]) <= tol*tol) { d[i+3] = 0; changed = true; }
+    }
+    if (!changed) break;
+  }
+}
+
+// 低tolから段階的に上げるセル切り出し：背景ビネット（緩い明度勾配）があると低tolの
+// フラッドが届かず背景が残るため、「セルの縁がほぼ透明になる」最小のtolを採用する。
+// 低tolで済むセルでは淡い翼膜（背景との距離30前後）が保護される。
+function cleanCellEscalating(srcD, srcW, x0, y0, cw, ch, bg) {
+  const TOLS = [18, 24, 30, 38, 48, 65];
+  let last = null;
+  for (const tol of TOLS) {
+    const c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    const ctx = c.getContext('2d');
+    const id = ctx.createImageData(cw, ch);
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const si = ((y0+y)*srcW + x0+x)*4, di = (y*cw+x)*4;
+      id.data[di] = srcD[si]; id.data[di+1] = srcD[si+1]; id.data[di+2] = srcD[si+2]; id.data[di+3] = srcD[si+3];
+    }
+    floodRemove(id.data, cw, ch, tol);
+    // セル縁1pxの不透明率で背景除去の成否を判定（翼が縁に触れる分の許容6%）
+    let edgeOpaque = 0, edgeN = 0;
+    for (let x = 0; x < cw; x++) { for (const y of [0, ch-1]) { edgeN++; if (id.data[(y*cw+x)*4+3] > 30) edgeOpaque++; } }
+    for (let y = 0; y < ch; y++) { for (const x of [0, cw-1]) { edgeN++; if (id.data[(y*cw+x)*4+3] > 30) edgeOpaque++; } }
+    last = { canvas: c, ctx, id, tol };
+    if (edgeOpaque / edgeN < 0.06) break;
+  }
+  erodeHalo(last.id.data, cw, ch, bg, last.tol + 8);
+  keepLargest(last.id.data, cw, ch);
+  last.ctx.putImageData(last.id, 0, 0);
+  return { canvas: last.canvas, data: last.id.data, tolUsed: last.tol };
+}
+
+// ===== 切り抜き品質改善 =====
+// softEdgeFromBg: 背景付き原本用。境界2px帯のピクセルについて「背景色との距離」から
+// 本来のAAアルファを復元し、背景の混入色を取り除く（defringe）。
+// 前提：背景はフラッドフィルで除去済み（alpha=0）。
+function softEdgeFromBg(d, w, h, bg, t0 = 6, t1 = 34) {
+  // 透明に4近傍で接する不透明ピクセル＝境界1層目、その隣＝2層目。
+  // 各層はスナップショットから判定する（走査順で内部へ連鎖しないように）。
+  const zone = new Uint8Array(w*h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y*w+x;
+    if (d[p*4+3] === 0) continue;
+    if ((x > 0 && d[(p-1)*4+3] === 0) || (x < w-1 && d[(p+1)*4+3] === 0) ||
+        (y > 0 && d[(p-w)*4+3] === 0) || (y < h-1 && d[(p+w)*4+3] === 0)) zone[p] = 1;
+  }
+  const layer1 = new Uint8Array(zone);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y*w+x;
+    if (d[p*4+3] === 0 || zone[p]) continue;
+    if ((x > 0 && layer1[p-1] === 1) || (x < w-1 && layer1[p+1] === 1) ||
+        (y > 0 && layer1[p-w] === 1) || (y < h-1 && layer1[p+w] === 1)) zone[p] = 2;
+  }
+  for (let p = 0; p < w*h; p++) {
+    if (!zone[p]) continue;
+    const i = p*4;
+    const dist = Math.sqrt(dist2(d[i], d[i+1], d[i+2], bg[0], bg[1], bg[2]));
+    const a = Math.max(0, Math.min(1, (dist - t0) / (t1 - t0)));
+    if (a < 0.08) { d[i+3] = 0; continue; }
+    if (a < 1) {
+      // 背景の混入を引き剥がす： c = a*fg + (1-a)*bg → fg = (c-(1-a)*bg)/a
+      d[i]   = Math.max(0, Math.min(255, (d[i]   - (1-a)*bg[0]) / a));
+      d[i+1] = Math.max(0, Math.min(255, (d[i+1] - (1-a)*bg[1]) / a));
+      d[i+2] = Math.max(0, Math.min(255, (d[i+2] - (1-a)*bg[2]) / a));
+      d[i+3] = Math.round(a * 255 * (d[i+3] / 255));
+    }
+  }
+}
+
+// refineAlpha: 切り抜き済み（原本なし）用のエッジ修復。
+// 汚れた1pxの縁を剥がし、輪郭色を外へ伸ばし、アルファを軽くぼかしてAAを作り直す。
+function refineAlpha(d, w, h) {
+  const n = w*h;
+  // 1) コア＝アルファ128以上から1pxエロード（縁の背景混じりピクセルを落とす）
+  const solid = new Uint8Array(n), core = new Uint8Array(n);
+  for (let p = 0; p < n; p++) solid[p] = d[p*4+3] >= 128 ? 1 : 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y*w+x;
+    if (!solid[p]) continue;
+    const edge = x === 0 || x === w-1 || y === 0 || y === h-1 ||
+                 !solid[p-1] || !solid[p+1] || !solid[p-w] || !solid[p+w];
+    core[p] = edge ? 0 : 1;
+  }
+  // 2) コアの色を外側へ3px伸ばす（フェザー部分が黒や背景色にならないように）
+  const hasCol = new Uint8Array(core);
+  for (let it = 0; it < 3; it++) {
+    const snap = new Uint8Array(hasCol);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const p = y*w+x;
+      if (snap[p]) continue;
+      let r = 0, g = 0, b = 0, c = 0;
+      if (x > 0   && snap[p-1]) { r+=d[(p-1)*4]; g+=d[(p-1)*4+1]; b+=d[(p-1)*4+2]; c++; }
+      if (x < w-1 && snap[p+1]) { r+=d[(p+1)*4]; g+=d[(p+1)*4+1]; b+=d[(p+1)*4+2]; c++; }
+      if (y > 0   && snap[p-w]) { r+=d[(p-w)*4]; g+=d[(p-w)*4+1]; b+=d[(p-w)*4+2]; c++; }
+      if (y < h-1 && snap[p+w]) { r+=d[(p+w)*4]; g+=d[(p+w)*4+1]; b+=d[(p+w)*4+2]; c++; }
+      if (c) { d[p*4]=r/c; d[p*4+1]=g/c; d[p*4+2]=b/c; hasCol[p] = 1; }
+    }
+  }
+  // 3) アルファ＝コアを3x3ボックスぼかし×2（≒ガウス）で滑らかなAAに
+  let a = new Float32Array(n);
+  for (let p = 0; p < n; p++) a[p] = core[p] ? 255 : 0;
+  for (let it = 0; it < 2; it++) {
+    const b2 = new Float32Array(n);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let s = 0, c = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x+dx, yy = y+dy;
+        if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+        s += a[yy*w+xx]; c++;
+      }
+      b2[y*w+x] = s / c;
+    }
+    a = b2;
+  }
+  for (let p = 0; p < n; p++) d[p*4+3] = Math.round(a[p]);
+}
+
+// ===== 連結成分ベースの個体抽出（縦切断なし） =====
+// 同一行の個体は翼・尻尾が横で重なるため、縦の切断線ではどこで切っても個体を割る。
+// しかし背景除去後はピクセル連結として完全に分離するので、連結成分で丸ごと取り出す。
+function findComponents(d, w, h, minSize) {
+  const vis = new Uint8Array(w*h);
+  const comps = [];
+  for (let s = 0; s < w*h; s++) {
+    if (vis[s] || d[s*4+3] < 30) { vis[s] = 1; continue; }
+    let n = 0, sumX = 0, minX = w, maxX = -1, minY = h, maxY = -1;
+    const px = [], stk = [s];
+    while (stk.length) {
+      const p = stk.pop();
+      if (p < 0 || p >= w*h || vis[p]) continue;
+      vis[p] = 1;
+      if (d[p*4+3] < 30) continue;
+      px.push(p); n++;
+      const x = p % w, y = (p / w) | 0;
+      sumX += x;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (x > 0) stk.push(p-1); if (x < w-1) stk.push(p+1);
+      if (y > 0) stk.push(p-w); if (y < h-1) stk.push(p+w);
+    }
+    if (n >= minSize) comps.push({ px, n, cx: sumX/n, minX, maxX, minY, maxY });
+  }
+  return comps;
+}
+
+// バンド帯を背景除去 → 連結成分を抽出 → x重心で cols 個の枠にグループ化。
+// 各枠の全成分（本体＋万一切り離れた翼/尻尾の断片）を1枚に焼き、defringeして返す。
+function extractFramesByComponents(srcD, srcW, y0, y1, cols, bg, tol = 40) {
+  const bh = y1 - y0 + 1;
+  const bd = new Uint8ClampedArray(srcW * bh * 4);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < srcW; x++) {
+    const si = ((y0+y)*srcW + x)*4, di = (y*srcW + x)*4;
+    bd[di] = srcD[si]; bd[di+1] = srcD[si+1]; bd[di+2] = srcD[si+2]; bd[di+3] = srcD[si+3];
+  }
+  // インクトポロジーで内外判定：輪郭線の外＝背景・影・罫線を色を問わず一括除去。
+  // 体内の背景同色ピクセル（尻尾のクリーム帯など）は輪郭に守られ無条件で残る。
+  inkBoundaryRemove(bd, srcW, bh, bg, cols);
+
+  let comps = findComponents(bd, srcW, bh, 1000);
+  // 薄い罫線/グリッドが flood をすり抜けて「帯全体に渡るスカスカの巣」成分になることがある。
+  // 充填率（n / bbox面積）が極端に低い成分、または1個体の想定幅を大きく超える成分を捨てる。
+  const cellW = srcW / cols;
+  comps = comps.filter(c => {
+    const bw = c.maxX - c.minX + 1, bhh = c.maxY - c.minY + 1;
+    return c.n / (bw * bhh) >= 0.10 && bw <= cellW * 1.6;
+  });
+  // アンカー＝大きい順に cols 個 → x順。各成分を最も近いアンカーに割り当て（断片も親へ戻る）。
+  const anchors = [...comps].sort((a, b) => b.n - a.n).slice(0, cols).sort((a, b) => a.cx - b.cx);
+  const groups = anchors.map(() => []);
+  for (const c of comps) {
+    let bi = 0, bdist = Infinity;
+    anchors.forEach((a, i) => { const dd = Math.abs(c.cx - a.cx); if (dd < bdist) { bdist = dd; bi = i; } });
+    groups[bi].push(c);
+  }
+
+  return groups.map(group => {
+    let minX = srcW, maxX = -1, minY = bh, maxY = -1;
+    for (const c of group) { if (c.minX < minX) minX = c.minX; if (c.maxX > maxX) maxX = c.maxX;
+                              if (c.minY < minY) minY = c.minY; if (c.maxY > maxY) maxY = c.maxY; }
+    const pad = 4;
+    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
+    maxX = Math.min(srcW-1, maxX + pad); maxY = Math.min(bh-1, maxY + pad);
+    const cw = maxX - minX + 1, ch = maxY - minY + 1;
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const ctx = cv.getContext('2d');
+    const id = ctx.createImageData(cw, ch);
+    for (const c of group) for (const p of c.px) {
+      const x = p % srcW, y = (p / srcW) | 0;
+      if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      const di = ((y-minY)*cw + (x-minX))*4, si = p*4;
+      id.data[di] = bd[si]; id.data[di+1] = bd[si+1]; id.data[di+2] = bd[si+2]; id.data[di+3] = bd[si+3];
+    }
+    softEdgeFromBg(id.data, cw, ch, bg); // 輪郭外周のAA復元＋defringe
+    ctx.putImageData(id, 0, 0);
+    return { canvas: cv, data: id.data };
+  });
 }
 
 // ---- k-means（最遠点シード・決定的）----
@@ -292,44 +624,154 @@ function composeSheet(frames) {
   return out;
 }
 
-async function saveCanvas(canvas, name, caption) {
+async function saveCanvas(canvas, name, caption, dir = 'モーション') {
   const div = document.createElement('div');
   div.className = 'out';
   div.innerHTML = `<div class="cap">${caption}</div>`;
   div.appendChild(canvas);
   document.getElementById('outs').appendChild(div);
   const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-  const res = await fetch(`${SAVE}?dir=${encodeURIComponent('モーション')}&name=${encodeURIComponent(name)}`, { method: 'POST', body: blob });
+  const res = await fetch(`${SAVE}?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`, { method: 'POST', body: blob });
   return `${await res.text()} (${Math.round(blob.size/1024)}KB)`;
 }
 
+// 画像全体の背景除去（縁がほぼ透明になる最小tolを採用）
+function bgRemoveWhole(d, w, h) {
+  for (const tol of [18, 24, 30, 38, 48, 65]) {
+    const copy = new Uint8ClampedArray(d);
+    floodRemove(copy, w, h, tol);
+    let eo = 0, en = 0;
+    for (let x = 0; x < w; x++) for (const y of [0, h-1]) { en++; if (copy[(y*w+x)*4+3] > 30) eo++; }
+    for (let y = 0; y < h; y++) for (const x of [0, w-1]) { en++; if (copy[(y*w+x)*4+3] > 30) eo++; }
+    if (eo / en < 0.02 || tol === 65) { d.set(copy); return tol; }
+  }
+}
+
+// ===== 個体イラストの再構築（原本→ソフトマット切り抜き→色変換） =====
+const MAP_IDLE = {
+  v1: [['#543b35','#fbcf7e'],['#674b43','#fbdf9e'],['#795a4f','#e0bc98'],['#8f6c59','#f3dcb4'],
+       ['#a17e69','#fbe8bf'],['#371d16','#7d4624'],['#f9ca74','#a16234'],['#d29d65','#c78b53'],
+       ['#fbedcd','#fbe8bf'],['#e5c4a3','#e0bc98'],['#d2b296','#e0bc98'],['#210c06','#361409']],
+  v2: [['#543b35','#fce9c6'],['#674b43','#fdf0d6'],['#795a4f','#efc79f'],['#8f6c59','#f5ddc0'],
+       ['#a17e69','#fce9c6'],['#371d16','#9b6850'],['#f9ca74','#f5a471'],['#d29d65','#e6a97e'],
+       ['#fbedcd','#fdf2e2'],['#e5c4a3','#efc79f'],['#d2b296','#efc79f'],['#210c06','#361109']],
+};
+const hexToRgb = s => [parseInt(s.slice(1,3),16), parseInt(s.slice(3,5),16), parseInt(s.slice(5,7),16)];
+
+function mapTargets(centers, map, gamma) {
+  const targets = centers.map(c => gammaC(c, gamma)); // 未指定クラスタは自分の色を同γで深く
+  for (const [src, dst] of map) {
+    const s = hexToRgb(src);
+    let bi = 0, bd = Infinity;
+    centers.forEach((c, i) => {
+      const v = (c[0]-s[0])**2 + (c[1]-s[1])**2 + (c[2]-s[2])**2;
+      if (v < bd) { bd = v; bi = i; }
+    });
+    targets[bi] = gammaC(hexToRgb(dst), gamma);
+  }
+  return targets;
+}
+
+async function rebuildBabyIdles() {
+  log('--- ベビーidle 3色（原本からソフトマット再切り抜き＋色変換） ---');
+  const img = await loadImg('/tools/_pristine/baby3.png');
+  const { w, h, d } = imgData(img);
+  const bg = bgColorOf(d, w, h);
+  const tol = bgRemoveWhole(d, w, h);
+  removeShadow(d, w, h);        // 接地影除去（内部で最大成分抽出も実行）
+  softEdgeFromBg(d, w, h, bg);  // AAアルファ復元＋背景色のにじみ除去
+  log(`原本 ${w}x${h} / 背景除去tol=${tol}`);
+  const base = document.createElement('canvas');
+  base.width = w; base.height = h;
+  base.getContext('2d').putImageData(new ImageData(d, w, h), 0, 0);
+  const centers = kmeans(sampleFrames([{ canvas: base }]), 12);
+  const jobs = [
+    { name: 'ニシアフリカトカゲモドキ3.png', targets: centers.map(c => gammaC(c, 1.20)) },
+    { name: 'ニシアフリカトカゲモドキ1.png', targets: mapTargets(centers, MAP_IDLE.v1, 1.35) },
+    { name: 'ニシアフリカトカゲモドキ2.png', targets: mapTargets(centers, MAP_IDLE.v2, 1.35) },
+  ];
+  const results = [];
+  for (const job of jobs) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(base, 0, 0);
+    remapFrames([{ canvas: c }], centers, job.targets);
+    results.push(await saveCanvas(c, job.name, job.name, 'ニシアフ'));
+    log(job.name + ': ' + results[results.length-1]);
+  }
+  return results;
+}
+
+async function rebuildEgg() {
+  log('--- 卵（原本からソフトマット再切り抜き） ---');
+  const img = await loadImg('/tools/_pristine/egg.png');
+  const { w, h, d } = imgData(img);
+  const bg = bgColorOf(d, w, h);
+  const tol = bgRemoveWhole(d, w, h);
+  removeShadow(d, w, h);
+  softEdgeFromBg(d, w, h, bg);
+  log(`原本 ${w}x${h} / 背景除去tol=${tol}`);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').putImageData(new ImageData(d, w, h), 0, 0);
+  const r = await saveCanvas(c, 'たまご１.png', 'たまご１.png', '');
+  log('たまご１.png: ' + r);
+  return r;
+}
+
+// 既存の切り抜き済みファイル（原本なし）のエッジ修復
+async function refineFiles(list) {
+  const results = [];
+  for (const { dir, name } of list) {
+    const img = await loadImg('/renderer/assets/' + (dir ? dir + '/' : '') + name);
+    const { w, h, d } = imgData(img);
+    refineAlpha(d, w, h);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').putImageData(new ImageData(d, w, h), 0, 0);
+    const r = await saveCanvas(c, name, `${name}（エッジ修復）`, dir);
+    log(name + ': ' + r);
+    results.push(name);
+  }
+  return results;
+}
+
 // ---- ニシアフ系：3行（行=色）×Nコマのシートを処理 ----
-async function processGeckoSheet(src, cols, outDefs) {
-  log(`--- ${src} ---`);
+// opts.thresh: 行・列検出のしきい値（淡い翼膜がある場合は20）
+// opts.tol:    指定すると固定tol＋ハロ剥がしで背景除去（淡い翼膜の保護用）
+async function processGeckoSheet(src, cols, outDefs, opts = {}) {
+  const { thresh = 60, tol = null } = opts;
+  log(`--- ${src} (thresh=${thresh}, tol=${tol ?? 'adaptive'}) ---`);
   const img = await loadImg(src);
   const { w, h, d } = imgData(img);
   const bg = bgColorOf(d, w, h);
-  let bands = detectBands(d, w, h, bg);
-  log(`size ${w}x${h} / bands: ${bands.map(b => `${b.y0}-${b.y1}`).join(', ')}`);
-  // 番号ヘッダー等の細い帯を除き、高い順に3本→y順
-  bands = bands.sort((a, b) => (b.y1-b.y0) - (a.y1-a.y0)).slice(0, 3).sort((a, b) => a.y0 - b.y0);
+  const allBands = detectBands(d, w, h, bg, 6, thresh).sort((a, b) => a.y0 - b.y0);
+  log(`size ${w}x${h} / bands: ${allBands.map(b => `${b.y0}-${b.y1}`).join(', ')}`);
+  // 番号ヘッダー等の細い帯を除き、高い順に3本→y順（拡張時の隣接判定には全帯を使う）
+  const bands = [...allBands].sort((a, b) => (b.y1-b.y0) - (a.y1-a.y0)).slice(0, 3).sort((a, b) => a.y0 - b.y0);
   const results = [];
   for (const def of outDefs) {
     const band = bands[def.row];
-    const pad = 6;
-    const y0 = Math.max(0, band.y0 - pad), y1 = Math.min(h - 1, band.y1 + pad);
-    const cellW = Math.floor(w / cols), ch = y1 - y0 + 1;
-    const frames = [], tols = [];
-    for (let i = 0; i < cols; i++) {
-      const cell = cleanCell(d, w, i*cellW, y0, cellW, ch);
-      frames.push(cell); tols.push(cell.tolUsed);
-    }
+    // 翼が帯の外（特に上）へはみ出すので、隣の帯にぶつからない範囲で大きく縦拡張する。
+    // 連結成分で個体ごとに取り出すので、隣行の断片が混ざっても別成分として分離・除外される。
+    const EXPAND = 80;
+    const ai = allBands.indexOf(band);
+    const prev = ai > 0 ? allBands[ai-1] : null;
+    const next = ai < allBands.length - 1 ? allBands[ai+1] : null;
+    const y0 = prev ? Math.max(prev.y1 + 2, band.y0 - EXPAND) : Math.max(0, band.y0 - EXPAND);
+    const y1 = next ? Math.min(next.y0 - 2, band.y1 + EXPAND) : Math.min(h - 1, band.y1 + EXPAND);
+    // 連結成分ベースで個体を丸ごと抽出（縦に切らないので右側・翼が一切欠けない）
+    const frames = extractFramesByComponents(d, w, y0, y1, cols, bg);
+    const sizes = frames.map(f => {
+      let n = 0; for (let p = 0; p < f.canvas.width*f.canvas.height; p++) if (f.data[p*4+3] > 30) n++;
+      return n;
+    });
     const samples = sampleFrames(frames);
     const centers = kmeans(samples, 12);
     const targets = centers.map(c => gammaC(c, def.gamma));
     remapFrames(frames, centers, targets);
     const sheet = composeSheet(frames);
-    const r = await saveCanvas(sheet, def.name, `${def.name}（tol: ${tols.join(',')}）`);
+    const r = await saveCanvas(sheet, def.name, `${def.name}（成分px: ${sizes.join(',')}）`);
     log(`${def.name}: ${r}`);
     results.push(def.name);
   }

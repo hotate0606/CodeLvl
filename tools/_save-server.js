@@ -5,7 +5,12 @@ const fs = require('fs');
 const path = require('path');
 
 const ASSETS = path.join(__dirname, '..', 'renderer', 'assets');
-const DIRS = { '': ASSETS, 'モーション': path.join(ASSETS, 'モーション') }; // 保存先ホワイトリスト
+const DIRS = { // 保存先ホワイトリスト
+  '': ASSETS,
+  'モーション': path.join(ASSETS, 'モーション'),
+  'ニシアフ': path.join(ASSETS, 'ニシアフ'),
+  '_diag': path.join(__dirname, '_diag'),
+};
 
 http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');

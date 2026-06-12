@@ -127,7 +127,7 @@ const dotFrames = {
   gecko: {
     idle: { green: [], blue: [], gold: [] },
     yawn: [palSet(), palSet(), palSet()],
-    idleAnim: [null, null, palSet()],
+    idleAnim: [palSet(), null, palSet()],
   },
   // スライム（将来の種族。ゲーム側の選択ロジックは未実装、素材のみ先行ロード）
   slime: {
@@ -200,32 +200,37 @@ function buildSheetFrames(img, cols, rows, count, target, dotW, bgTol) {
     floodFillTransparent(d, w, h, [[0,0],[w-1,0],[0,h-1],[w-1,h-1]], bgTol);
     keepLargestComponent(d, w, h);
     cx.putImageData(id, 0, 0);
-    // 実体のバウンディングボックス
-    let minX = w, minY = h, maxX = -1, maxY = -1;
+    // 実体のバウンディングボックスと不透明面積
+    let minX = w, minY = h, maxX = -1, maxY = -1, area = 0;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       if (d[(y*w+x)*4+3] > 0) {
         if (x<minX) minX=x; if (x>maxX) maxX=x;
         if (y<minY) minY=y; if (y>maxY) maxY=y;
+        if (d[(y*w+x)*4+3] > 30) area++;
       }
     }
-    processed.push({ canvas: c, minX, minY, bw: maxX-minX+1, bh: maxY-minY+1 });
+    processed.push({ canvas: c, minX, minY, bw: maxX-minX+1, bh: maxY-minY+1, area: area || 1 });
   }
   if (!processed.length || processed[0].bw <= 0) return;
 
-  // 共通スケール：コマ0の体幅を dotW にマップ（全コマ同一スケール＝体の大きさが一定）。
+  // 共通スケール：コマ0の体幅を dotW にマップ。
+  // さらにAI生成シートはコマ間で素体サイズ自体がブレる（最大±10%）ため、
+  // 各コマを「体の面積√がコマ0と一致する」よう個別に正規化する。
+  // 面積はポーズ差（口開け・翼）にほぼ不変なので、体格だけが揃い動きは保たれる。
   const scale = dotW / processed[0].bw;
+  for (const p of processed) p.fscale = scale * Math.sqrt(processed[0].area / p.area);
 
   // 共通キャンバスのサイズ：最も大きく広がるコマに合わせる（頭の反り分の縦余白も確保）。
   let maxSW = 0, maxSH = 0;
   for (const p of processed) {
-    maxSW = Math.max(maxSW, p.bw * scale);
-    maxSH = Math.max(maxSH, p.bh * scale);
+    maxSW = Math.max(maxSW, p.bw * p.fscale);
+    maxSH = Math.max(maxSH, p.bh * p.fscale);
   }
   const outW = Math.ceil(maxSW) + 2;
   const outH = Math.ceil(maxSH) + 2;
 
   const frames = processed.map((p) => {
-    const sw = p.bw * scale, sh = p.bh * scale;
+    const sw = p.bw * p.fscale, sh = p.bh * p.fscale;
     const o  = document.createElement('canvas');
     o.width = outW; o.height = outH;
     const oc = o.getContext('2d');
@@ -267,6 +272,11 @@ loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dot
 loadSheet('./assets/モーション/ニシアフ最終進化待機1.png', dotFrames.gecko.idleAnim[2].green, { cols: 11, rows: 1, count: 11 });
 loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFrames.gecko.idleAnim[2].blue,  { cols: 11, rows: 1, count: 11 });
 loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11 });
+
+// ベビー待機（6コマ。行=色の混載シートを分割→シームレス化のため孤立コマを除き並べ替え済み。1=green/2=blue/3=gold）
+loadSheet('./assets/モーション/ニシアフ待機1.png', dotFrames.gecko.idleAnim[0].green, { cols: 6, rows: 1, count: 6 });
+loadSheet('./assets/モーション/ニシアフ待機2.png', dotFrames.gecko.idleAnim[0].blue,  { cols: 6, rows: 1, count: 6 });
+loadSheet('./assets/モーション/ニシアフ待機3.png', dotFrames.gecko.idleAnim[0].gold,  { cols: 6, rows: 1, count: 6 });
 
 // スライム待機（青が原本、ピンク・緑は各色イラストのパレットへ変換済み）
 loadSheet('./assets/モーション/スライム待機青.png',     dotFrames.slime.idleAnim.blue,  { cols: 7, rows: 1, count: 7 });
@@ -548,7 +558,18 @@ function currentYawnSet() {
   if (!set || !set.frames.length || !set.refW) return null;
   const f = yawnFrameAt(evolutionStage, performance.now() / 1000 - yawn.start);
   const img = set.frames[f];
-  return img ? { img, refW: set.refW, frame: f, peak: yawnTimeline(evolutionStage).peak } : null;
+  return img ? { img, set, refW: set.refW, frame: f, peak: yawnTimeline(evolutionStage).peak } : null;
+}
+
+// キャンバスの不透明ピクセル数（結果はキャンバスにキャッシュ）。
+// シートが違うとコマ0のbbox（尻尾の丸まり・翼の開き）が変わるため、bbox幅でなく
+// 「体の面積」で待機⇔あくびの表示スケールを揃える（ポーズ差にほぼ不変）。
+function canvasArea(c) {
+  if (c.__area) return c.__area;
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let n = 0;
+  for (let p = 0; p < c.width * c.height; p++) if (d[p*4+3] > 30) n++;
+  return (c.__area = n || 1);
 }
 
 // あくびのスケジューラ。素材があり待機状態のときだけ周期的に発火させる。
@@ -668,11 +689,23 @@ function drawCreatureSprite(now, alpha = 1) {
 
   let dotImg, dW, dH, anchorX, anchorY, shadowW;
   if (yset) {
-    // 全コマ同一サイズの共通キャンバス。コマ0の体幅(refW)を baseW に合わせるので、
-    // dW/dH はコマ間で完全に一定＝サイズが全くブレない。キャンバス中心=体の中心、
-    // 下端=足元なので、足元中心アンカーで常に接地して再生される。
+    // 全コマ同一サイズの共通キャンバスなので、コマ間でサイズは全くブレない。
+    // ただしシート間（待機⇔あくび）はコマ0のbboxが違う（尻尾・翼のポーズ差）ため、
+    // bbox幅基準だとあくびの瞬間に一瞬大きくなる。そこで「体の面積」が待機表示と
+    // 一致するスケールに補正する。待機基準がないステージはbbox幅基準にフォールバック。
     dotImg = yset.img;
-    const scale = baseW / yset.refW;
+    let scale = baseW / yset.refW;
+    const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
+    if (ia && ia.frames.length && ia.refW) {
+      const si = baseW / ia.refW; // 待機アニメの表示スケール
+      scale = si * Math.sqrt(canvasArea(ia.frames[0]) / canvasArea(yset.set.frames[0]));
+    } else if (stage === 0) {
+      const idleImg = dotFrames.gecko.idle[pal] && dotFrames.gecko.idle[pal][0];
+      if (idleImg) {
+        const si = baseW / idleImg.width; // 静止idleの表示スケール
+        scale = si * Math.sqrt(canvasArea(idleImg) / canvasArea(yset.set.frames[0]));
+      }
+    } // stage 1 は待機＝あくびコマ0（同一シート）なので補正不要
     dW = dotImg.width * scale; dH = dotImg.height * scale;
     anchorX = dW / 2;   // キャンバス中心 = 体の中心X
     anchorY = dH;       // キャンバス下端 = 足元Y
