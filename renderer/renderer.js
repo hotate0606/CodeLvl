@@ -570,16 +570,19 @@ function canvasArea(c) {
 }
 
 // あくびのスケジューラ。素材があり待機状態のときだけ周期的に発火させる。
+// 発火間隔は YAWN_MIN〜YAWN_MAX 秒のランダム（初回も同じ）。頻度を下げて自然にする。
+const YAWN_MIN = 30, YAWN_MAX = 50;
+const nextYawnDelay = () => YAWN_MIN + Math.random() * (YAWN_MAX - YAWN_MIN);
 function updateYawn(now) {
   const set = yawnSetFor(evolutionStage, currentPaletteName());
   const avail = set && set.frames.length && set.refW &&
                 bornPalette && !evoActive && !hatchActive;
   if (!avail) { yawn.active = false; return; }
-  if (yawn.next === 0) yawn.next = now + 1.5 + Math.random() * 2; // 初回まで少し待つ（1.5〜3.5秒）
+  if (yawn.next === 0) yawn.next = now + nextYawnDelay(); // 初回まで 30〜50秒
   if (!yawn.active && now >= yawn.next) { yawn.active = true; yawn.start = now; }
   if (yawn.active && (now - yawn.start) >= yawnTotal(evolutionStage)) {
     yawn.active = false;
-    yawn.next = now + 3 + Math.random() * 4; // 次のあくびまで3〜7秒
+    yawn.next = now + nextYawnDelay(); // 次のあくびまで 30〜50秒
   }
 }
 
@@ -702,8 +705,14 @@ function drawCreatureSprite(now, alpha = 1) {
     const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
     const ys = stage >= 1 ? yawnSetFor(stage, pal) : null;
     if (ia && ia.frames.length && ia.refW) {
-      const IDLE_ANIM_FPS = 6; // 呼吸感のあるゆったりループ
-      dotImg = ia.frames[Math.floor(now * IDLE_ANIM_FPS) % ia.frames.length];
+      // 1サイクル（呼吸＋瞬き）を再生したら、コマ0（目開き）で IDLE_REST 秒静止してから
+      // 次のサイクルへ。これで瞬きの間隔が空き、自然な見え方になる（瞬き回数を減らす）。
+      const IDLE_ANIM_FPS = 6;  // コマ送りの速さ
+      const IDLE_REST     = 3.5; // サイクル後の静止秒数（瞬き間隔の調整つまみ。大きいほど瞬きが減る）
+      const playDur = ia.frames.length / IDLE_ANIM_FPS; // 1サイクルの再生時間
+      const t = now % (playDur + IDLE_REST);
+      const fi = t < playDur ? Math.floor(t * IDLE_ANIM_FPS) : 0; // 再生中はコマ送り／静止中はコマ0
+      dotImg = ia.frames[fi];
       const scale = baseW / ia.refW;
       dW = dotImg.width * scale; dH = dotImg.height * scale;
       anchorX = dW / 2; anchorY = dH;
