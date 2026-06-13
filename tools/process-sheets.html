@@ -188,9 +188,22 @@ function inkBoundaryRemove(d, w, h, bg, cols = 0) {
     stk.push(x-1,y, x+1,y, x,y-1, x,y+1);
   }
   for (let p = 0; p < n; p++) if (outside[p]) d[p*4+3] = 0;
-  // 注意：インクに囲まれた領域（尻尾と体の隙間等）は背景色でも除去しない。
-  // 体内に背景同色のピクセル（クリーム帯・翼膜）が実在するため、色で区別すると
-  // 必ず体に穴が開く。閉領域の背景残りは軽微な見た目コストとして許容する。
+  // インクに囲まれた閉領域（翼と体の隙間・尻尾の巻き込み等）に残る背景は、
+  // ここでは消さず removeBgPockets に任せる（原本背景＝無彩色チェッカーなので
+  // 暖色のクリーム腹・翼膜と彩度で区別でき、体に穴を開けずに除去できる）。
+}
+
+// 閉領域に残った背景チェッカー（無彩色：白254/グレー240）を透明化する。
+// 原本の背景は彩度ゼロの中性色、本体は全色が暖色／有彩なので sat で安全に分離できる
+// （最も淡いサーモン体でも sat>0.15。チェッカーは sat≈0）。recolor 前に呼ぶこと。
+function removeBgPockets(d, w, h, lumMin = 230, satMax = 0.08) {
+  for (let p = 0; p < w*h; p++) {
+    if (d[p*4+3] === 0) continue;
+    const r = d[p*4], g = d[p*4+1], b = d[p*4+2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const lum = 0.2126*r + 0.7152*g + 0.0722*b, sat = mx ? (mx - mn) / mx : 0;
+    if (lum >= lumMin && sat <= satMax) d[p*4+3] = 0;
+  }
 }
 
 // 指定サイズ未満の孤立成分を捨てる（影除去後に残る浮き滓の掃除）
@@ -479,6 +492,7 @@ function extractFramesByComponents(srcD, srcW, y0, y1, cols, bg, tol = 40) {
   // インクトポロジーで内外判定：輪郭線の外＝背景・影・罫線を色を問わず一括除去。
   // 体内の背景同色ピクセル（尻尾のクリーム帯など）は輪郭に守られ無条件で残る。
   inkBoundaryRemove(bd, srcW, bh, bg, cols);
+  removeBgPockets(bd, srcW, bh); // 閉領域に残る背景チェッカー（翼/体/尻尾の隙間）を透明化
 
   let comps = findComponents(bd, srcW, bh, 1000);
   // 薄い罫線/グリッドが flood をすり抜けて「帯全体に渡るスカスカの巣」成分になることがある。
