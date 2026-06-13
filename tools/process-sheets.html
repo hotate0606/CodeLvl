@@ -193,17 +193,34 @@ function inkBoundaryRemove(d, w, h, bg, cols = 0) {
   // 暖色のクリーム腹・翼膜と彩度で区別でき、体に穴を開けずに除去できる）。
 }
 
-// 閉領域に残った背景チェッカー（無彩色：白254/グレー240）を透明化する。
-// 原本の背景は彩度ゼロの中性色、本体は全色が暖色／有彩なので sat で安全に分離できる
-// （最も淡いサーモン体でも sat>0.15。チェッカーは sat≈0）。recolor 前に呼ぶこと。
+// 閉領域に残った背景チェッカーを透明化する。recolor 前に呼ぶこと。
+// 原本背景は無彩色チェッカー（白254／グレー240、sat≈0）。ただし翼の骨・棘先には
+// ほぼ無彩色の白いハイライト（つや）が実在し、単純な「明るい中性色を消す」では
+// それも削れてしまう。そこで「グレー240の市松タイル」を種にして中性色を flood する：
+//   - 背景ポケットは市松なので必ずグレー種を含み、白タイルごと一括除去される。
+//   - 本体の白ハイライトは滑らかなつや（純白寄り・グレー種なし）なので残る。
 function removeBgPockets(d, w, h, lumMin = 230, satMax = 0.08) {
-  for (let p = 0; p < w*h; p++) {
+  const n = w*h, neutral = new Uint8Array(n), stk = [];
+  for (let p = 0; p < n; p++) {
     if (d[p*4+3] === 0) continue;
     const r = d[p*4], g = d[p*4+1], b = d[p*4+2];
     const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
     const lum = 0.2126*r + 0.7152*g + 0.0722*b, sat = mx ? (mx - mn) / mx : 0;
-    if (lum >= lumMin && sat <= satMax) d[p*4+3] = 0;
+    if (lum >= lumMin && sat <= satMax) {
+      neutral[p] = 1;
+      if (sat <= 0.04 && lum >= 232 && lum <= 247) stk.push(p); // 市松のグレータイル＝種
+    }
   }
+  const rm = new Uint8Array(n);
+  while (stk.length) {
+    const p = stk.pop();
+    if (p < 0 || p >= n || rm[p] || !neutral[p]) continue;
+    rm[p] = 1;
+    const x = p % w, y = (p / w) | 0;
+    if (x > 0) stk.push(p-1); if (x < w-1) stk.push(p+1);
+    if (y > 0) stk.push(p-w); if (y < h-1) stk.push(p+w);
+  }
+  for (let p = 0; p < n; p++) if (rm[p]) d[p*4+3] = 0;
 }
 
 // 指定サイズ未満の孤立成分を捨てる（影除去後に残る浮き滓の掃除）
