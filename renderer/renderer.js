@@ -519,9 +519,6 @@ let badEnd   = 0;
 const hearts   = [];
 const sparkles = [];
 
-// ---- スプライト用アイドルアニメーション ----
-const idleAnim = { nextTick: 0, tickEnd: 0, tickType: 0 };
-
 // ---- あくびモーション（スプライト方式・全ステージ3色対応）----
 // 数秒ごとに自発的にあくびを1サイクル再生する。タイムラインは大あくびのコマを
 // 長めに見せて自然な“ふわぁ”感を出す。各 d は秒。peak のコマでブルブル震える。
@@ -587,22 +584,9 @@ function updateYawn(now) {
 }
 
 function getSpriteOffsets(now) {
-  // 縦ゆれ（呼吸の上下動・小ジャンプ）は廃止。じっと待機する。
-  // ごくわずかな傾きの揺れ（体重移動感）だけ残す。縦移動はしない。
-  const microRot = Math.sin(now * 0.3) * 0.008;
-
-  // 時々の小さなかしぎ（傾きのみ・縦移動なし、3〜8秒ごと）
-  let actionRot = 0;
-  if (now > idleAnim.nextTick) {
-    idleAnim.nextTick = now + 3 + Math.random() * 5;
-    idleAnim.tickEnd  = now + 0.45;
-  }
-  if (now < idleAnim.tickEnd) {
-    const p = (idleAnim.tickEnd - now) / 0.45; // 1→0
-    actionRot = Math.sin(p * Math.PI) * 0.07; // かしぎ
-  }
-
-  return { dy: 0, rot: microRot + actionRot };
+  // 待機中の手続き的な揺れ（縦ゆれ・傾き・たまの横かしぎ）は廃止。
+  // 待機の動きはスプライトのモーションシートで表現する。あくびのブルブルは別処理（shake*）。
+  return { dy: 0, rot: 0 };
 }
 
 const EVO_DUR = 3.0;
