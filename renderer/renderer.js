@@ -33,6 +33,9 @@ vctx.imageSmoothingEnabled = false;
 // ===== ゲッコー スプライト（画像ダウンサンプル方式）=====
 // ソース解像度も DPR に合わせて上げ、高DPIでもキャラ/卵がくっきり表示されるようにする。
 const GECKO_DOT_W = Math.round(110 * DPR);
+// dotW にこれ（0）を渡すと縮小せず元イラスト解像度のまま保持する（高精細）。
+// ベビーは表示が大きめ＆素材が高解像度なので、ドット縮小せず native で出す。
+const NATIVE_RES  = 0;
 const DOT_SCALE   = 2;
 
 function keepLargestComponent(d, w, h) {
@@ -105,6 +108,7 @@ function makeDotSprite(img, crop, dotW, { bgTol = 70 } = {}) {
   }
   if (maxX < 0) return full;
   const bw=maxX-minX+1, bh=maxY-minY+1;
+  if (dotW <= 0) dotW = bw; // native：縮小せず体の元解像度のまま
   const dotH = Math.max(1, Math.round(bh*dotW/bw));
   const out = document.createElement('canvas');
   out.width=dotW; out.height=dotH;
@@ -159,10 +163,10 @@ function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
 // goldから色替え生成したもの（柄・構図・ポーズは全色共通＝モーションと完全に揃う）。
 // goldも同ツールのパレット再構成（自身のクラスタ色）を通してあり、質感が3色で統一。
 // 加工前のAI生成原本はgit履歴を参照。
-// stage 0（ベビー）: 1→green, 2→blue, 3→gold
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green);
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue);
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold);
+// stage 0（ベビー）: 1→green, 2→blue, 3→gold。ベビーは native（縮小なし）で高精細に。
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green, 0, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue,  0, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold,  0, NATIVE_RES);
 // stage 1（進化後）: 進化１→green, 進化２→blue, 進化３→gold（番号＝個体が一致）
 loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1);
 loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1);
@@ -217,7 +221,7 @@ function buildSheetFrames(img, cols, rows, count, target, dotW, bgTol) {
   // さらにAI生成シートはコマ間で素体サイズ自体がブレる（最大±10%）ため、
   // 各コマを「体の面積√がコマ0と一致する」よう個別に正規化する。
   // 面積はポーズ差（口開け・翼）にほぼ不変なので、体格だけが揃い動きは保たれる。
-  const scale = dotW / processed[0].bw;
+  const scale = dotW > 0 ? dotW / processed[0].bw : 1; // dotW<=0 は native（縮小なし）
   for (const p of processed) p.fscale = scale * Math.sqrt(processed[0].area / p.area);
 
   // 共通キャンバスのサイズ：最も大きく広がるコマに合わせる（頭の反り分の縦余白も確保）。
@@ -255,11 +259,11 @@ function loadSheet(src, target, { cols = 3, rows = 3, count, dotW = GECKO_DOT_W,
 // ベビーあくび（3×3グリッドの先頭7コマ）。goldが生成原本。1（green）・2（blue）は
 // tools/recolor.html でgoldから色替えした透過シート（構図・コマは原本と完全一致）。
 loadSheet('./assets/モーション/ニシアフモーション（あくび）.png',
-          dotFrames.gecko.yawn[0].gold, { cols: 3, rows: 3, count: 7 });
+          dotFrames.gecko.yawn[0].gold, { cols: 3, rows: 3, count: 7, dotW: NATIVE_RES });
 loadSheet('./assets/モーション/ニシアフモーション（あくび）1.png',
-          dotFrames.gecko.yawn[0].green, { cols: 3, rows: 3, count: 7 });
+          dotFrames.gecko.yawn[0].green, { cols: 3, rows: 3, count: 7, dotW: NATIVE_RES });
 loadSheet('./assets/モーション/ニシアフモーション（あくび）2.png',
-          dotFrames.gecko.yawn[0].blue, { cols: 3, rows: 3, count: 7 });
+          dotFrames.gecko.yawn[0].blue, { cols: 3, rows: 3, count: 7, dotW: NATIVE_RES });
 
 // 進化・最終進化のモーション：3色混載シートを tools/process-sheets.html で
 // 行分割・透過化・パレット再構成（白系γ1.35/goldγ1.20）した1行シート。番号は 1=green, 2=blue, 3=gold。
@@ -274,9 +278,9 @@ loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFra
 loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11 });
 
 // ベビー待機（6コマ。行=色の混載シートを分割→シームレス化のため孤立コマを除き並べ替え済み。1=green/2=blue/3=gold）
-loadSheet('./assets/モーション/ニシアフ待機1.png', dotFrames.gecko.idleAnim[0].green, { cols: 6, rows: 1, count: 6 });
-loadSheet('./assets/モーション/ニシアフ待機2.png', dotFrames.gecko.idleAnim[0].blue,  { cols: 6, rows: 1, count: 6 });
-loadSheet('./assets/モーション/ニシアフ待機3.png', dotFrames.gecko.idleAnim[0].gold,  { cols: 6, rows: 1, count: 6 });
+loadSheet('./assets/モーション/ニシアフ待機1.png', dotFrames.gecko.idleAnim[0].green, { cols: 6, rows: 1, count: 6, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ待機2.png', dotFrames.gecko.idleAnim[0].blue,  { cols: 6, rows: 1, count: 6, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ待機3.png', dotFrames.gecko.idleAnim[0].gold,  { cols: 6, rows: 1, count: 6, dotW: NATIVE_RES });
 
 // スライム待機（青が原本、ピンク・緑は各色イラストのパレットへ変換済み）
 loadSheet('./assets/モーション/スライム待機青.png',     dotFrames.slime.idleAnim.blue,  { cols: 7, rows: 1, count: 7 });
