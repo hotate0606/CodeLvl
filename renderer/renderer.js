@@ -167,10 +167,10 @@ function loadDotSprite(src, target, index = 0, dotW = GECKO_DOT_W, bgTol = 50) {
 loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ1.png',     dotFrames.gecko.idle.green, 0, NATIVE_RES);
 loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ2.png',     dotFrames.gecko.idle.blue,  0, NATIVE_RES);
 loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ3.png',     dotFrames.gecko.idle.gold,  0, NATIVE_RES);
-// stage 1（進化後）: 進化１→green, 進化２→blue, 進化３→gold（番号＝個体が一致）
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1);
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1);
-loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化３.png', dotFrames.gecko.idle.gold,  1);
+// stage 1（進化後）: 進化１→green, 進化２→blue, 進化３→gold（番号＝個体が一致）。native で高精細に。
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化１.png', dotFrames.gecko.idle.green, 1, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化２.png', dotFrames.gecko.idle.blue,  1, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/ニシアフリカトカゲモドキ進化３.png', dotFrames.gecko.idle.gold,  1, NATIVE_RES);
 // 卵（孵化前）: ドット絵。eggDot[0]
 const eggDot = [];
 loadDotSprite('./assets/たまご１.png', eggDot);
@@ -267,18 +267,19 @@ loadSheet('./assets/モーション/ニシアフモーション（あくび）2.
 
 // 進化・最終進化のモーション：3色混載シートを tools/process-sheets.html で
 // 行分割・透過化・パレット再構成（白系γ1.35/goldγ1.20）した1行シート。番号は 1=green, 2=blue, 3=gold。
-loadSheet('./assets/モーション/ニシアフ進化あくび1.png', dotFrames.gecko.yawn[1].green, { cols: 7,  rows: 1, count: 7 });
-loadSheet('./assets/モーション/ニシアフ進化あくび2.png', dotFrames.gecko.yawn[1].blue,  { cols: 7,  rows: 1, count: 7 });
-loadSheet('./assets/モーション/ニシアフ進化あくび3.png', dotFrames.gecko.yawn[1].gold,  { cols: 7,  rows: 1, count: 7 });
-loadSheet('./assets/モーション/ニシアフ進化待機1.png', dotFrames.gecko.idleAnim[1].green, { cols: 9, rows: 1, count: 9 });
-loadSheet('./assets/モーション/ニシアフ進化待機2.png', dotFrames.gecko.idleAnim[1].blue,  { cols: 9, rows: 1, count: 9 });
-loadSheet('./assets/モーション/ニシアフ進化待機3.png', dotFrames.gecko.idleAnim[1].gold,  { cols: 9, rows: 1, count: 9 });
-loadSheet('./assets/モーション/ニシアフ最終進化あくび1.png', dotFrames.gecko.yawn[2].green, { cols: 10, rows: 1, count: 10 });
-loadSheet('./assets/モーション/ニシアフ最終進化あくび2.png', dotFrames.gecko.yawn[2].blue,  { cols: 10, rows: 1, count: 10 });
-loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dotFrames.gecko.yawn[2].gold,  { cols: 10, rows: 1, count: 10 });
-loadSheet('./assets/モーション/ニシアフ最終進化待機1.png', dotFrames.gecko.idleAnim[2].green, { cols: 11, rows: 1, count: 11 });
-loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFrames.gecko.idleAnim[2].blue,  { cols: 11, rows: 1, count: 11 });
-loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11 });
+// 進化後・最終進化は大きく表示されるので native（縮小なし）で読み込み、拡大表示のボケを防ぐ。
+loadSheet('./assets/モーション/ニシアフ進化あくび1.png', dotFrames.gecko.yawn[1].green, { cols: 7,  rows: 1, count: 7,  dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ進化あくび2.png', dotFrames.gecko.yawn[1].blue,  { cols: 7,  rows: 1, count: 7,  dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ進化あくび3.png', dotFrames.gecko.yawn[1].gold,  { cols: 7,  rows: 1, count: 7,  dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ進化待機1.png', dotFrames.gecko.idleAnim[1].green, { cols: 9, rows: 1, count: 9, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ進化待機2.png', dotFrames.gecko.idleAnim[1].blue,  { cols: 9, rows: 1, count: 9, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ進化待機3.png', dotFrames.gecko.idleAnim[1].gold,  { cols: 9, rows: 1, count: 9, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび1.png', dotFrames.gecko.yawn[2].green, { cols: 10, rows: 1, count: 10, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび2.png', dotFrames.gecko.yawn[2].blue,  { cols: 10, rows: 1, count: 10, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dotFrames.gecko.yawn[2].gold,  { cols: 10, rows: 1, count: 10, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化待機1.png', dotFrames.gecko.idleAnim[2].green, { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFrames.gecko.idleAnim[2].blue,  { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
+loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
 
 // ベビー待機（6コマ。行=色の混載シートを分割→シームレス化のため孤立コマを除き並べ替え済み。1=green/2=blue/3=gold）
 loadSheet('./assets/モーション/ニシアフ待機1.png', dotFrames.gecko.idleAnim[0].green, { cols: 6, rows: 1, count: 6, dotW: NATIVE_RES });

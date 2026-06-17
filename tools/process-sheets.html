@@ -551,7 +551,7 @@ function extractFramesByComponents(srcD, srcW, y0, y1, cols, bg, tol = 40) {
       const di = ((y-minY)*cw + (x-minX))*4, si = p*4;
       id.data[di] = bd[si]; id.data[di+1] = bd[si+1]; id.data[di+2] = bd[si+2]; id.data[di+3] = bd[si+3];
     }
-    softEdgeFromBg(id.data, cw, ch, bg); // 輪郭外周のAA復元＋defringe
+    refineAlpha(id.data, cw, ch); // 1px侵食＋本体色でAA再構築（inkBoundaryRemoveの膨張で残る背景由来の白ふちを除去）
     ctx.putImageData(id, 0, 0);
     return { canvas: cv, data: id.data };
   });
