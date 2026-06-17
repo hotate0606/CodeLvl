@@ -131,7 +131,7 @@ const dotFrames = {
   gecko: {
     idle: { green: [], blue: [], gold: [] },
     yawn: [palSet(), palSet(), palSet()],
-    idleAnim: [palSet(), null, palSet()],
+    idleAnim: [palSet(), palSet(), palSet()],
   },
   // スライム（将来の種族。ゲーム側の選択ロジックは未実装、素材のみ先行ロード）
   slime: {
@@ -270,6 +270,9 @@ loadSheet('./assets/モーション/ニシアフモーション（あくび）2.
 loadSheet('./assets/モーション/ニシアフ進化あくび1.png', dotFrames.gecko.yawn[1].green, { cols: 7,  rows: 1, count: 7 });
 loadSheet('./assets/モーション/ニシアフ進化あくび2.png', dotFrames.gecko.yawn[1].blue,  { cols: 7,  rows: 1, count: 7 });
 loadSheet('./assets/モーション/ニシアフ進化あくび3.png', dotFrames.gecko.yawn[1].gold,  { cols: 7,  rows: 1, count: 7 });
+loadSheet('./assets/モーション/ニシアフ進化待機1.png', dotFrames.gecko.idleAnim[1].green, { cols: 9, rows: 1, count: 9 });
+loadSheet('./assets/モーション/ニシアフ進化待機2.png', dotFrames.gecko.idleAnim[1].blue,  { cols: 9, rows: 1, count: 9 });
+loadSheet('./assets/モーション/ニシアフ進化待機3.png', dotFrames.gecko.idleAnim[1].gold,  { cols: 9, rows: 1, count: 9 });
 loadSheet('./assets/モーション/ニシアフ最終進化あくび1.png', dotFrames.gecko.yawn[2].green, { cols: 10, rows: 1, count: 10 });
 loadSheet('./assets/モーション/ニシアフ最終進化あくび2.png', dotFrames.gecko.yawn[2].blue,  { cols: 10, rows: 1, count: 10 });
 loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dotFrames.gecko.yawn[2].gold,  { cols: 10, rows: 1, count: 10 });
@@ -295,8 +298,8 @@ off.width  = Math.round(LOGICAL_W * SS);   // 実ピクセルは SS 倍。描画
 off.height = Math.round(LOGICAL_H * SS);
 const g = off.getContext('2d');
 
-// アイソメ部屋のラグ中央付近にペットが立つ。ISO.SIDEY〜ISO.FRONTY の中間帯を床面とする。
-const FLOOR_Y = 46; // 論理px。アイソメの床（ラグの上あたり）
+// テーマ画像のラグ中央付近にペットが立つ床面のY（論理px）。
+const FLOOR_Y = 46;
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -304,12 +307,6 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // モーションは後日スプライト生成方式で付ける予定。
 
 // ---- 小物描画ヘルパ ----
-// 論理座標で矩形を描く。SS により 1/SS 単位の小数座標も使える（細かいドット）。
-function px(x, y, w, h, color) {
-  g.fillStyle = color;
-  g.fillRect(x, y, w, h);
-}
-
 const HEART = ['.X.X.', 'XXXXX', 'XXXXX', '.XXX.', '..X..'];
 const SPARK = ['..X..', '..X..', 'XXXXX', '..X..', '..X..'];
 
@@ -324,133 +321,56 @@ function drawPattern(pat, ox, oy, color) {
   }
 }
 
-// ---- 部屋（アイソメトリック：2枚の壁が中央で合わさる斜め俯瞰）----
-// 中央の縦エッジで左右の壁が合わさり、床はひし形に広がる。外側は透明（カードが透ける）。
-// 画角を近づける＝部屋を画面外まで広げて余白を縮める（端は少しはみ出してクロップ）。
-const ISO = { CX: 40, TOPY: -2, BACKY: 22, SIDETOPY: 20, LX: -10, RX: 90, SIDEY: 44, FRONTY: 66 };
-function drawRoom() {
-  const { CX, TOPY, BACKY, SIDETOPY, LX, RX, SIDEY, FRONTY } = ISO;
-  const HW = CX - LX;             // 壁/床の横半幅
-  const RISE = SIDETOPY - TOPY;   // アイソメの傾き（横HWあたりの縦上がり）
-  const STEP = 0.25;
-  const Y0 = Math.max(0, TOPY);   // 画面上端でクロップ
-  const row = (y, x0, x1, c) => { if (x1 > x0) px(x0, y, x1 - x0, STEP, c); };
-  const wallTopL = y => CX - HW * (y - TOPY) / RISE;
-  const wallTopR = y => CX + HW * (y - TOPY) / RISE;
-  const seamL = y => CX - HW * (y - BACKY) / RISE;
-  const seamR = y => CX + HW * (y - BACKY) / RISE;
-  const frontL = y => LX + HW * (y - SIDEY) / RISE;
-  const frontR = y => RX - HW * (y - SIDEY) / RISE;
-  const WL = '#d6ebdc', WR = '#c7ddce', FLOOR = '#b07d4f';
-
-  // 壁2枚＋床ひし形（行ごとにスパンを塗る）
-  for (let y = Y0; y < FRONTY; y += STEP) {
-    if (y < SIDETOPY)   { row(y, wallTopL(y), CX, WL); row(y, CX, wallTopR(y), WR); }
-    else if (y < BACKY) { row(y, LX, CX, WL); row(y, CX, RX, WR); }
-    else if (y < SIDEY) { const sL = seamL(y), sR = seamR(y); row(y, LX, sL, WL); row(y, sL, sR, FLOOR); row(y, sR, RX, WR); }
-    else                { row(y, frontL(y), frontR(y), FLOOR); }
-  }
-
-  // 床板（右下方向に走る線。床ひし形内に収まる）
-  const plank = (u, c) => { const x0 = CX - HW * u, y0 = BACKY + RISE * u, x1 = x0 + HW, y1 = y0 + RISE, n = 300; for (let i = 0; i <= n; i++) { const t = i / n; px(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 0.5, 0.5, c); } };
-  for (let k = 1; k < 10; k++) plank(k / 10, '#8a5d39');
-
-  // 巾木（奥の2辺）＋ コーナー＋壁の輪郭
-  for (let y = BACKY; y < SIDEY; y += STEP) { px(seamL(y) - 0.3, y, 0.7, STEP, '#7a5333'); px(seamR(y) - 0.4, y, 0.7, STEP, '#5e4028'); }
-  px(CX - 0.25, Y0, 0.5, BACKY - Y0, '#bcdac8');
-  for (let y = Y0; y < SIDETOPY; y += STEP) { px(wallTopL(y) - 0.3, y, 0.6, STEP, '#b8d4c2'); px(wallTopR(y) - 0.3, y, 0.6, STEP, '#aeccbb'); }
-
-  // ラグ（床のひし形）
-  const diamond = (cx, cy, hw, hh, c) => { for (let y = cy - hh; y < cy + hh; y += STEP) { const t = 1 - Math.abs(y - cy) / hh; const w = hw * t; px(cx - w, y, w * 2, STEP, c); } };
-  diamond(40, 51, 26, 12, '#cdd8e0'); diamond(40, 51, 22, 10, '#dde6ec');
-
-  // 壁オブジェ（縦ストリップで壁の傾きに沿わせた平行四辺形）
-  const wallStripR = (f0, f1, top, h, c) => { for (let f = f0; f <= f1; f += 0.004) { const x = CX + HW * f, yt = TOPY + RISE * f + top; px(x, yt, 0.5, h, c); } };
-  const wallStripL = (f0, f1, top, h, c) => { for (let f = f0; f <= f1; f += 0.004) { const x = CX - HW * f, yt = TOPY + RISE * f + top; px(x, yt, 0.5, h, c); } };
-  const disc = (cx, cy, r, c) => { for (let y = cy - r; y < cy + r; y += STEP) { const w = Math.sqrt(Math.max(0, r * r - (y - cy) * (y - cy))); px(cx - w, y, w * 2, STEP, c); } };
-
-  // 左壁：エアコン＋時計
-  wallStripL(0.52, 0.84, 6, 4, '#e9f1f0'); wallStripL(0.52, 0.84, 6, 1, '#cfdcdb');
-  disc(20, 12, 3, '#dfe7ea'); disc(20, 12, 2.3, '#ffffff'); px(20, 10, 0.4, 2, '#556'); px(20, 12, 1.4, 0.4, '#556');
-
-  // 右壁：窓
-  wallStripR(0.32, 0.8, 5, 13, '#33414f');
-  wallStripR(0.35, 0.77, 6.4, 10.2, '#9fd2ec');
-  wallStripR(0.56, 0.565, 6.4, 10.2, '#33414f');
-  for (let f = 0.35; f <= 0.77; f += 0.004) { const x = CX + HW * f; px(x, TOPY + RISE * f + 11.4, 0.5, 0.5, '#33414f'); }
+// ===== テーマ（部屋の背景画像）=====
+// 部屋・家具は手続き描画をやめ、テーマ画像で表示する。デフォルトが初期テーマ、
+// 残り（テスト用）はアイテムボックスからクリックで装備して切り替える。
+const THEMES = [
+  { id: 'theme_default', name: 'デフォルト',     file: 'テーマ（デフォルト）.png', icon: '🏠' },
+  { id: 'theme_nice',    name: 'ちょっといい家', file: 'ちょっといい家.png',       icon: '🏡' },
+  { id: 'theme_old',     name: '古い家',         file: '古い家.png',               icon: '🏚️' },
+  { id: 'theme_angel',   name: '天使の家',       file: '天使の家.png',             icon: '😇' },
+  { id: 'theme_gem',     name: '宝石',           file: '宝石.png',                 icon: '💎' },
+  { id: 'theme_devil',   name: '悪魔',           file: '悪魔.png',                 icon: '😈' },
+  { id: 'theme_sakura',  name: '桜の家',         file: '桜の家.png',               icon: '🌸' },
+  { id: 'theme_water',   name: '水中',           file: '水中.png',                 icon: '🌊' },
+  { id: 'theme_moss',    name: '苔むした家',     file: '苔むした家.png',           icon: '🍀' },
+  { id: 'theme_outdoor', name: '野外',           file: '野外.png',                 icon: '⛺' },
+];
+const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
+const themeImages = {};
+let activeTheme = 'theme_default';
+for (const t of THEMES) {
+  const img = new Image();
+  img.onload = () => { if (t.id === activeTheme) buildRoomCache(); }; // 適用中なら反映
+  img.src = './assets/テーマ/' + t.file;
+  themeImages[t.id] = img;
 }
 
-// 棚（家具）：細グリッド（0.25論理単位 = sp 1マス）で作り込んだ木製本棚。
-// 設置原点(論理) OX,OY。設置範囲は約 16×16 論理px（= sp 64×64マス）。床=FLOOR_Y。
-function drawShelf() {
-  const OX = 3, OY = 42, U = 0.25; // 手前左の床に設置
-  const sp = (x, y, w, h, c) => px(OX + x * U, OY + y * U, w * U, h * U, c);
-
-  // 影
-  sp(5, 62, 54, 2, '#34271d');
-  // 脚
-  sp(5, 59, 8, 4, '#4a3526'); sp(51, 59, 8, 4, '#4a3526');
-  // 外枠＋ベベル
-  sp(2, 2, 60, 58, '#4a3526');      // 本体（濃）
-  sp(4, 4, 56, 54, '#7a5836');      // 面（中木）
-  sp(4, 4, 56, 2, '#a8814f');       // 上ハイライト
-  sp(4, 4, 2, 54, '#9a7344');       // 左ハイライト
-  sp(58, 4, 2, 54, '#3a2a1d');      // 右シャドウ
-  sp(4, 56, 56, 2, '#3a2a1d');      // 下シャドウ
-  // 奥の凹み＋木目
-  sp(7, 7, 50, 49, '#2c2118');
-  for (let i = 0; i < 5; i++) sp(11 + i * 9, 7, 0.5, 49, '#332619');
-  // 棚板2枚
-  for (const by of [23, 39]) { sp(7, by, 50, 3, '#7a5836'); sp(7, by, 50, 1, '#9a7a4a'); sp(7, by + 2, 50, 1, '#1f1610'); }
-
-  // ===== 上段：本＋積み本＋地球儀 =====
-  const book = (x, w, top, base, hi) => {
-    const h = 23 - top;
-    sp(x, top, w, h, base); sp(x, top, 1, h, hi); sp(x + w - 1, top, 1, h, '#1f140e');
-    sp(x, top, w, 1, '#e8dcc0'); sp(x, top + Math.round(h * 0.45), w, 1, hi);
-  };
-  book(9, 4, 8, '#a23f33', '#cf5f4d');
-  book(13, 3, 6, '#b08a2e', '#e6c452');
-  book(16, 4, 9, '#2f6f96', '#4a9ec0');
-  book(20, 3, 8, '#3f8f55', '#5fc878');
-  book(23, 4, 7, '#7a5a9a', '#a87ec0');
-  book(27, 3, 9, '#a23f33', '#cf5f4d');
-  // 横積み本
-  sp(37, 19, 16, 4, '#7a8f5a'); sp(37, 19, 16, 1, '#9fb87a');
-  sp(38, 16, 14, 3, '#5a8fb0'); sp(38, 16, 14, 1, '#82b0d0');
-  sp(39, 13, 12, 3, '#b06a8a'); sp(39, 13, 12, 1, '#d895b0');
-  // 地球儀
-  sp(45, 7, 8, 8, '#3a7d9a'); sp(46, 6, 6, 1, '#3a7d9a'); sp(46, 15, 6, 1, '#3a7d9a');
-  sp(47, 9, 2, 3, '#7fc0d8'); sp(50, 11, 2, 2, '#7fc0d8'); sp(48, 7, 3, 1, '#2c6076');
-  sp(48, 15, 2, 3, '#8a6240');
-
-  // ===== 中段：額＋時計＋鉢植え =====
-  sp(9, 28, 12, 9, '#caa45a'); sp(11, 30, 8, 5, '#7ec8e3'); sp(11, 33, 8, 2, '#5fae68'); sp(12, 31, 2, 1, '#ffffff');
-  sp(25, 27, 10, 10, '#8a6240'); sp(26, 28, 8, 8, '#ece4cc'); sp(30, 29, 1, 4, '#3a2a1d'); sp(30, 31, 3, 1, '#3a2a1d'); sp(29, 32, 1, 1, '#a23f33');
-  sp(41, 32, 9, 5, '#9c6b44'); sp(40, 31, 11, 1, '#b07c50'); sp(42, 32, 7, 1, '#2c2118');
-  sp(44, 26, 1, 6, '#3f8f55'); sp(42, 27, 2, 2, '#4fae68'); sp(46, 27, 3, 2, '#5fc878'); sp(45, 24, 2, 2, '#5fc878');
-
-  // ===== 下段：引き出し＋小瓶＋ティーポット =====
-  sp(9, 43, 20, 11, '#8a5e3a'); sp(9, 43, 20, 1, '#a8744a'); sp(9, 53, 20, 1, '#3a2a1d');
-  sp(18, 43, 1, 11, '#5e4028');
-  sp(13, 47, 2, 2, '#2f2118'); sp(22, 47, 2, 2, '#2f2118');
-  sp(31, 45, 6, 9, '#b58fe0'); sp(31, 46, 1, 8, '#dcc4f5'); sp(32, 43, 4, 2, '#8a6240');
-  sp(41, 47, 12, 7, '#b5604a'); sp(42, 46, 10, 1, '#c87a60'); sp(45, 44, 4, 2, '#b5604a'); sp(46, 43, 2, 1, '#caa45a');
-  sp(52, 48, 3, 3, '#b5604a'); sp(40, 49, 2, 3, '#9a4a38'); sp(43, 48, 2, 2, '#d89580');
-}
-
-// 部屋は静的なので一度だけ描いてキャッシュし、毎フレームはこれを貼る（負荷対策）。
+// 部屋（テーマ画像）はテーマ変更時だけ描いてキャッシュし、毎フレームはこれを貼る。
 const roomCanvas = document.createElement('canvas');
 roomCanvas.width = off.width; roomCanvas.height = off.height;
 const roomCtx = roomCanvas.getContext('2d');
 function buildRoomCache() {
   g.setTransform(1, 0, 0, 1, 0, 0);
-  g.clearRect(0, 0, off.width, off.height);   // 部屋の外側は透明にする
-  g.setTransform(SS, 0, 0, SS, 0, 0);
-  g.imageSmoothingEnabled = false;
-  drawRoom();
+  g.clearRect(0, 0, off.width, off.height);
+  const img = themeImages[activeTheme];
+  if (img && img.complete && img.naturalWidth) {
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, 0, 0, off.width, off.height); // テーマ画像をルーム領域いっぱいに
+  }
   roomCtx.clearRect(0, 0, roomCanvas.width, roomCanvas.height);
   roomCtx.drawImage(off, 0, 0);
+}
+
+// 適用するテーマを切り替える（アイテムボックスからクリックで装備）。
+function setActiveTheme(id) {
+  if (!THEME_BY_ID[id]) return;
+  activeTheme = id;
+  buildRoomCache();
+  window.codelvl?.setTheme(id);
+  renderInventory();                 // 使用中ハイライトを更新（次回開いたとき用）
+  boxModal.classList.add('hidden');  // 閉じて新しい背景を見せる
 }
 
 // ===== キャラ素材（ハイブリッド：今はコード描画、将来スプライト差し替え）=====
@@ -942,7 +862,7 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
-buildRoomCache();        // 静的な部屋を一度だけ描いてキャッシュ
+buildRoomCache();        // 初期テーマ画像を描いてキャッシュ（読込後はonloadで再構築）
 requestAnimationFrame(frame);
 
 // ---- ゲームパラメータ ----
@@ -1331,6 +1251,8 @@ if (window.codelvl) {
     evolutionHardLocked  = pet.evolutionHardLocked ?? false;
     coins             = state.coins ?? 30;
     coinPoolUnits     = state.coinPoolUnits ?? 3;
+    activeTheme       = state.theme ?? 'theme_default';
+    buildRoomCache(); // 保存テーマを背景に反映（画像未ロードならonloadで再構築）
     updateUI(state);
   }
 
@@ -1367,8 +1289,10 @@ const ITEM_CATALOG = {
   mon_gecko_blue:  { name: 'ももこ（休止）',   tag: 'monster', icon: '🦎' },
   mon_gecko_gold:  { name: 'くろすけ（休止）', tag: 'monster', icon: '🦎' },
 };
+// テーマ（部屋背景）をカタログに登録（name/icon は THEMES から）
+for (const t of THEMES) ITEM_CATALOG[t.id] = { name: t.name, tag: 'theme', icon: t.icon };
 
-const TAG_LABELS = { egg: '卵', monster: 'モンスター', furniture: '家具', decoration: '装飾品', item: 'アイテム' };
+const TAG_LABELS = { egg: '卵', monster: 'モンスター', furniture: '家具', decoration: '装飾品', theme: 'テーマ', item: 'アイテム' };
 
 let inventory   = [];
 let activeTag   = 'all';
@@ -1383,19 +1307,12 @@ async function refreshInventory() {
 
 function renderInventory() {
   boxGrid.innerHTML = '';
+  // テーマ以外のアイテム（テーマは装備式なので下で専用描画）
   const items = inventory.filter((it) => {
     const meta = ITEM_CATALOG[it.id];
-    if (!meta) return false;
+    if (!meta || meta.tag === 'theme') return false;
     return activeTag === 'all' || meta.tag === activeTag;
   });
-
-  if (items.length === 0) {
-    const empty = document.createElement('div');
-    empty.id = 'itembox-empty';
-    empty.textContent = 'なにも持っていません';
-    boxGrid.appendChild(empty);
-    return;
-  }
 
   for (const it of items) {
     const meta = ITEM_CATALOG[it.id];
@@ -1418,6 +1335,32 @@ function renderInventory() {
       slot.addEventListener('click', () => useItem(it.id));
     }
     boxGrid.appendChild(slot);
+  }
+
+  // テーマ（部屋背景）：装備式。デフォルトは常時所持＋付与済みテーマを表示。
+  if (activeTag === 'all' || activeTag === 'theme') {
+    const owned = ['theme_default'];
+    for (const it of inventory) {
+      if (ITEM_CATALOG[it.id]?.tag === 'theme' && !owned.includes(it.id)) owned.push(it.id);
+    }
+    for (const id of owned) {
+      const meta = ITEM_CATALOG[id];
+      const slot = document.createElement('div');
+      slot.className = 'slot';
+      const isActive = id === activeTheme;
+      if (isActive) slot.classList.add('slot-active');
+      slot.title = `${meta.name}${isActive ? '（使用中）' : ''}`;
+      slot.innerHTML = `<span>${meta.icon}</span>`;
+      slot.addEventListener('click', () => setActiveTheme(id));
+      boxGrid.appendChild(slot);
+    }
+  }
+
+  if (!boxGrid.children.length) {
+    const empty = document.createElement('div');
+    empty.id = 'itembox-empty';
+    empty.textContent = 'なにも持っていません';
+    boxGrid.appendChild(empty);
   }
 }
 

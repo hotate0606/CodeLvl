@@ -96,6 +96,12 @@ function calcMoodDelta(current, last) {
   return -10;                          // かなり少ない → 不機嫌
 }
 
+// 部屋テーマ。デフォルト以外はテスト用にアイテムボックスへ付与する。
+const THEME_ITEM_IDS = [
+  'theme_nice', 'theme_old', 'theme_angel', 'theme_gem', 'theme_devil',
+  'theme_sakura', 'theme_water', 'theme_moss', 'theme_outdoor',
+];
+
 // ---- データ管理（ゲームデータをdata.jsonに一本化）----
 function loadData() {
   if (!fs.existsSync(DATA_PATH)) {
@@ -110,7 +116,9 @@ function loadData() {
       dailyXpDate: '',      // dailyXpの対象日
       xpBoostUntil: 0,      // XPブーストの終了時刻(ms)。0=未使用
       coinPoolUnits: 3,     // コインプールの最大ユニット数（拡張アイテムで最大5）
-      inventory: [],        // アイテムボックス [{ id, qty }]（ダブりはqtyでスタック）
+      inventory: THEME_ITEM_IDS.map((id) => ({ id, qty: 1 })), // テスト用テーマ
+      theme: 'theme_default', // 適用中の部屋テーマ
+      themesGranted: true,
     };
   }
   const data = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
@@ -125,6 +133,14 @@ function loadData() {
   if (data.xpBoostUntil == null) data.xpBoostUntil = 0;
   if (data.coinPoolUnits == null) data.coinPoolUnits = 3;
   if (!data.inventory)           data.inventory     = [];
+  if (!data.theme)               data.theme         = 'theme_default';
+  // テーマのテスト付与（一度だけ）：デフォルト以外をアイテムボックスへ
+  if (!data.themesGranted) {
+    for (const id of THEME_ITEM_IDS) {
+      if (!data.inventory.find((i) => i.id === id)) data.inventory.push({ id, qty: 1 });
+    }
+    data.themesGranted = true;
+  }
   // ペット状態の不足フィールドを補完
   const def = defaultPetState();
   for (const [k, v] of Object.entries(def)) {
@@ -455,6 +471,14 @@ ipcMain.handle('expand-coin-pool', () => {
   data.coinPoolUnits = clamp((data.coinPoolUnits ?? 3) + 1, 3, 5);
   saveData(data);
   return data.coinPoolUnits;
+});
+
+// 適用中の部屋テーマを保存
+ipcMain.handle('set-theme', (_, id) => {
+  const data = loadData();
+  data.theme = id;
+  saveData(data);
+  return data.theme;
 });
 
 // ---- アイテムボックス ----

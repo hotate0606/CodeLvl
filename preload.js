@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('codelvl', {
   activateXpBoost: (ms) => ipcRenderer.invoke('activate-xp-boost', ms),
   expandCoinPool:  () => ipcRenderer.invoke('expand-coin-pool'),
 
+  // 部屋テーマ
+  setTheme:       (id) => ipcRenderer.invoke('set-theme', id),
+
   // アイテムボックス
   getInventory:   () => ipcRenderer.invoke('get-inventory'),
   addItem:        (id, qty) => ipcRenderer.invoke('add-item', { id, qty }),
