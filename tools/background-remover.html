@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>キャラクター切り抜きツール</title>
+<style>
+  :root{
+    --bg:#15131f; --panel:#1f1c2e; --panel2:#272338; --line:#3a3550;
+    --txt:#eceaf5; --sub:#a39fbe; --accent:#ffcf5a; --accent2:#7ad0a0;
+    --btn:#332e49; --btnh:#403a5c; --danger:#e0788a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font-family:system-ui,'Segoe UI','Hiragino Kaku Gothic ProN',Meiryo,sans-serif;font-size:13px}
+  h1{font-size:16px;margin:0;padding:14px 18px;border-bottom:1px solid var(--line);
+     display:flex;align-items:center;gap:10px;background:var(--panel)}
+  h1 .tag{font-size:11px;color:var(--sub);font-weight:400}
+  #app{display:flex;height:calc(100vh - 49px)}
+  /* 左：画像ビュー */
+  #stage{flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;
+         background:#0e0c16}
+  #viewport{position:absolute;inset:0}
+  /* 透明確認用の市松（CSSの背景。画像には描き込まれない） */
+  #viewport.bg-checker{background:
+      repeating-conic-gradient(#444 0% 25%, #555 0% 50%) 0 0 / 22px 22px}
+  #viewport.bg-white{background:#ffffff}
+  #viewport.bg-black{background:#000000}
+  #viewport.bg-purple{background:#6a32b4}
+  #view{position:absolute;top:0;left:0;image-rendering:auto;touch-action:none}
+  #hint{position:absolute;left:14px;bottom:12px;color:var(--sub);background:rgba(0,0,0,.45);
+        padding:6px 10px;border-radius:8px;pointer-events:none;font-size:12px}
+  #busy{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.6);
+        color:var(--accent);padding:5px 12px;border-radius:20px;display:none}
+  /* 右：操作パネル */
+  #side{width:330px;flex:none;overflow-y:auto;background:var(--panel);border-left:1px solid var(--line);padding:14px}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:14px}
+  .step h2{font-size:13px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .num{display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#221;
+       align-items:center;justify-content:center;font-weight:700;font-size:12px;flex:none}
+  .desc{color:var(--sub);font-size:12px;margin:0 0 8px;line-height:1.5}
+  button{font-family:inherit;font-size:13px;border:none;border-radius:8px;padding:8px 12px;cursor:pointer;
+         background:var(--btn);color:var(--txt)}
+  button:hover{background:var(--btnh)}
+  button.primary{background:var(--accent);color:#221;font-weight:700;width:100%;padding:11px;font-size:14px}
+  button.primary:hover{filter:brightness(1.07)}
+  button.save{background:var(--accent2);color:#0c2018;font-weight:700;width:100%;padding:11px;font-size:14px}
+  button.on{outline:2px solid var(--accent);background:var(--btnh)}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .row.j{justify-content:space-between}
+  .grow{flex:1}
+  /* ドロップ領域 */
+  #drop{border:2px dashed var(--line);border-radius:12px;padding:26px 14px;text-align:center;cursor:pointer;
+        color:var(--sub);transition:.15s;background:#1a1728}
+  #drop.hot{border-color:var(--accent);color:var(--txt);background:#241f38}
+  #drop .big{font-size:14px;color:var(--txt);margin-bottom:4px}
+  #fileName{font-size:12px;color:var(--accent2);margin-top:8px;word-break:break-all}
+  /* スライダー */
+  .sld{margin:12px 0}
+  .sld label{display:block;margin-bottom:4px;font-size:12px}
+  .sld .ends{display:flex;justify-content:space-between;color:var(--sub);font-size:11px;margin-top:2px}
+  input[type=range]{width:100%;accent-color:var(--accent);}
+  .swatches{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .sw{display:flex;align-items:center;gap:5px;background:var(--btn);border-radius:6px;padding:3px 6px;font-size:11px}
+  .sw .c{width:16px;height:16px;border-radius:3px;border:1px solid #0006}
+  .sw button{padding:0 4px;background:none;color:var(--danger);font-size:14px;line-height:1}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{flex:1;border-radius:0;background:var(--panel2)}
+  .seg button.on{background:var(--accent);color:#221;font-weight:700}
+  .mini{font-size:11px;color:var(--sub)}
+  hr{border:none;border-top:1px solid var(--line);margin:10px 0}
+  #savedNote{font-size:12px;color:var(--accent2);margin-top:8px;display:none}
+  input[type=file]{display:none}
+</style>
+</head>
+<body>
+<h1>✂️ キャラクター切り抜きツール <span class="tag">画像生成AIのキャラから背景を消して、透明PNGで保存</span></h1>
+
+<div id="app">
+  <!-- 画像ビュー -->
+  <div id="stage">
+    <div id="viewport" class="bg-checker">
+      <canvas id="view"></canvas>
+    </div>
+    <div id="busy">処理中…</div>
+    <div id="hint">マウスホイールで拡大縮小・ドラッグで移動</div>
+  </div>
+
+  <!-- 操作パネル -->
+  <div id="side">
+
+    <!-- 1. 画像を選ぶ -->
+    <div class="step">
+      <h2><span class="num">1</span>画像を選ぶ</h2>
+      <div id="drop">
+        <div class="big">ここに画像を入れてください</div>
+        <div>クリックして選ぶこともできます</div>
+        <div class="mini">PNG / JPG / WebP に対応</div>
+        <div id="fileName"></div>
+      </div>
+      <input type="file" id="file" accept="image/png,image/jpeg,image/webp">
+    </div>
+
+    <!-- 2. 背景を自動で消す -->
+    <div class="step">
+      <h2><span class="num">2</span>背景を自動で消す</h2>
+      <p class="desc">画像の外側からつながった背景（白・ベージュ・市松模様・単色）を消します。</p>
+      <button id="btnAuto" class="primary">背景を自動で消す</button>
+      <hr>
+      <p class="desc">うまく消えない色がある時は、下のボタンを押してから<br><b>消したい背景を画像の上でクリック</b>してください。</p>
+      <button id="btnPick">消したい背景を選ぶ</button>
+      <div id="seeds" class="swatches"></div>
+    </div>
+
+    <!-- 3. 仕上がりを調整する -->
+    <div class="step">
+      <h2><span class="num">3</span>仕上がりを調整する</h2>
+      <p class="desc">スライダーを動かすとすぐ反映されます。初期値は削りすぎない安全な強さです。</p>
+
+      <div class="sld">
+        <label>背景を消す強さ</label>
+        <input type="range" id="sBg" min="0" max="100" value="45">
+        <div class="ends"><span>弱い</span><span>強い</span></div>
+      </div>
+      <div class="sld">
+        <label>白いふちを減らす</label>
+        <input type="range" id="sEdge" min="0" max="100" value="25">
+        <div class="ends"><span>弱い</span><span>強い</span></div>
+      </div>
+      <div class="sld">
+        <label>小さな背景の残りを消す</label>
+        <input type="range" id="sSpeck" min="0" max="100" value="20">
+        <div class="ends"><span>弱い</span><span>強い</span></div>
+      </div>
+      <div class="sld">
+        <label>キャラクターの内側に残った背景を消す</label>
+        <input type="range" id="sInner" min="0" max="100" value="15">
+        <div class="ends"><span>弱い</span><span>強い</span></div>
+      </div>
+      <div class="sld">
+        <label>影を消す強さ <span class="mini">（キャラの下の影）</span></label>
+        <input type="range" id="sShadow" min="0" max="100" value="0">
+        <div class="ends"><span>弱い</span><span>強い</span></div>
+      </div>
+    </div>
+
+    <!-- 手直し -->
+    <div class="step">
+      <h2>🖌 手直し</h2>
+      <p class="desc">自動で消えない所は手でなぞって直せます。</p>
+      <div class="seg" id="tools">
+        <button data-tool="move" class="on">移動</button>
+        <button data-tool="erase">消す</button>
+        <button data-tool="restore">戻す</button>
+      </div>
+      <div class="sld">
+        <label>ブラシの大きさ</label>
+        <input type="range" id="sBrush" min="4" max="160" value="40">
+      </div>
+      <div class="row">
+        <button id="btnUndo" class="grow">元に戻す</button>
+        <button id="btnRedo" class="grow">やり直す</button>
+        <button id="btnReset" class="grow">リセット</button>
+      </div>
+    </div>
+
+    <!-- 4. 確認して保存する -->
+    <div class="step">
+      <h2><span class="num">4</span>確認して保存する</h2>
+      <p class="desc">背景の色を変えて、白いふちや消し残りを確認できます。</p>
+      <div class="seg" id="previewBgs">
+        <button data-bg="checker" class="on">透明</button>
+        <button data-bg="white">白</button>
+        <button data-bg="black">黒</button>
+        <button data-bg="purple">紫</button>
+      </div>
+      <hr>
+      <button id="btnSave" class="save">透明PNGで保存</button>
+      <div id="savedNote"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+// ===== 状態 =====
+let imgW=0, imgH=0;
+let orig=null;        // 元画像 RGBA（絶対に書き換えない）
+let work=null;        // 自動処理の結果 RGBA
+let manual=null;      // 手直し: 0=なし / 1=消す / 2=戻す
+let fileBaseName='character';
+let autoSeeds=[];     // 自動検出した背景色 [[r,g,b]...]
+let userSeeds=[];     // クリックで足した背景色
+const params={ bgStrength:45, edgeShrink:25, despeckle:20, inner:15, shadow:0 };
+
+// 表示
+let scale=1, offX=0, offY=0;
+let tool='move', brush=40, previewBg='checker';
+let pickMode=false;
+
+// 履歴（手直し・背景色・調整をまとめてスナップショット）
+let undoStack=[], redoStack=[];
+
+const composite=document.createElement('canvas'); // 最終結果（native解像度・透明）
+const cctx=composite.getContext('2d');
+const view=$('view');
+const vctx=view.getContext('2d');
+
+// ===== 画像読み込み =====
+function loadImage(img, name){
+  imgW=img.naturalWidth; imgH=img.naturalHeight;
+  const c=document.createElement('canvas'); c.width=imgW; c.height=imgH;
+  const ctx=c.getContext('2d'); ctx.drawImage(img,0,0);
+  orig=ctx.getImageData(0,0,imgW,imgH).data;
+  work=new Uint8ClampedArray(orig);          // とりあえずコピー
+  manual=new Uint8Array(imgW*imgH);
+  userSeeds=[]; autoSeeds=detectSeeds();
+  composite.width=imgW; composite.height=imgH;
+  if(name){ fileBaseName=name.replace(/\.[^.]+$/,''); $('fileName').textContent='読み込み: '+name; }
+  undoStack=[]; redoStack=[];
+  fitView();
+  renderSeeds();
+  computeAuto(); composeFinal(); draw();
+  $('hint').textContent='「背景を自動で消す」を押してください';
+}
+function loadFile(f){ if(!f) return;
+  const img=new Image(); img.onload=()=>loadImage(img,f.name); img.src=URL.createObjectURL(f);
+}
+// テスト/自動化用にURLからも読める
+function loadURL(url){ return fetch(url).then(r=>r.blob()).then(b=>new Promise(res=>{
+  const img=new Image(); img.onload=()=>{loadImage(img,url.split('/').pop()); res(true);}; img.src=URL.createObjectURL(b);
+}));}
+
+// ===== 背景色の自動検出（四辺をサンプリングして代表色をまとめる）=====
+function detectSeeds(){
+  const samples=[];
+  const stepX=Math.max(1,Math.floor(imgW/120)), stepY=Math.max(1,Math.floor(imgH/120));
+  const add=(x,y)=>{const i=(y*imgW+x)*4; if(orig[i+3]>=8) samples.push([orig[i],orig[i+1],orig[i+2]]);};
+  for(let x=0;x<imgW;x+=stepX){ add(x,0); add(x,imgH-1); }
+  for(let y=0;y<imgH;y+=stepY){ add(0,y); add(imgW-1,y); }
+  // 近い色をまとめる（市松模様は2色まとまる）
+  const clusters=[];
+  for(const s of samples){
+    let hit=null;
+    for(const c of clusters){ const d=dist2(s,c.c); if(d< 34*34){hit=c;break;} }
+    if(hit){ hit.n++; hit.s[0]+=s[0]; hit.s[1]+=s[1]; hit.s[2]+=s[2]; hit.c=[hit.s[0]/hit.n,hit.s[1]/hit.n,hit.s[2]/hit.n]; }
+    else clusters.push({c:s.slice(),s:s.slice(),n:1});
+  }
+  clusters.sort((a,b)=>b.n-a.n);
+  const total=samples.length||1;
+  // 多数派（縁の20%以上を占める色）を最大3つ採用
+  return clusters.filter(c=>c.n/total>=0.18).slice(0,3).map(c=>c.c.map(Math.round));
+}
+function dist2(a,b){const dr=a[0]-b[0],dg=a[1]-b[1],db=a[2]-b[2];return dr*dr+dg*dg+db*db;}
+function activeSeeds(){ return autoSeeds.concat(userSeeds); }
+
+function renderSeeds(){
+  const box=$('seeds'); box.innerHTML='';
+  userSeeds.forEach((s,i)=>{
+    const el=document.createElement('div'); el.className='sw';
+    el.innerHTML=`<span class="c" style="background:rgb(${s[0]},${s[1]},${s[2]})"></span>選んだ背景<button title="やめる">✕</button>`;
+    el.querySelector('button').onclick=()=>{ pushHistory(); userSeeds.splice(i,1); renderSeeds(); computeAuto();composeFinal();draw(); };
+    box.appendChild(el);
+  });
+}
+
+// ===== 自動処理本体 =====
+function computeAuto(){
+  if(!orig) return;
+  busy(true);
+  const n=imgW*imgH, W=imgW, H=imgH;
+  work.set(orig);
+  const seeds=activeSeeds();
+  const tol=20+params.bgStrength*0.9;
+  const removed=new Uint8Array(n);            // 1=背景として消す
+  const stack=new Int32Array(n); let sp=0;
+  const isBg=(i,t)=>{
+    const r=orig[i*4],g=orig[i*4+1],b=orig[i*4+2];
+    let dm=1e9; for(const s of seeds){const dr=r-s[0],dg=g-s[1],db=b-s[2];const d=dr*dr+dg*dg+db*db;if(d<dm)dm=d;}
+    return dm<=t*t;
+  };
+  const pushIf=(i,t)=>{ if(removed[i])return;
+    if(orig[i*4+3]<8){removed[i]=1;stack[sp++]=i;return;}   // 元から透明な所は通り抜ける
+    if(isBg(i,t)){removed[i]=1;stack[sp++]=i;} };
+  // (2) 外側からつながった背景を消す
+  for(let x=0;x<W;x++){ pushIf(x,tol); pushIf((H-1)*W+x,tol); }
+  for(let y=0;y<H;y++){ pushIf(y*W,tol); pushIf(y*W+W-1,tol); }
+  while(sp){ const i=stack[--sp], x=i%W, y=(i/W)|0;
+    if(x>0)pushIf(i-1,tol); if(x<W-1)pushIf(i+1,tol);
+    if(y>0)pushIf(i-W,tol); if(y<H-1)pushIf(i+W,tol); }
+
+  // (4) キャラ下のドロップシャドウを消す（灰色っぽい所を背景側から広げて消す）
+  if(params.shadow>0){
+    const floor=235-params.shadow*1.55;       // 強いほど暗い灰色まで消す
+    let sp2=0; const st2=stack; // 再利用
+    for(let i=0;i<n;i++) if(removed[i]) st2[sp2++]=i;
+    const grayOk=(i)=>{ if(removed[i]||orig[i*4+3]<8) return false;
+      const r=orig[i*4],g=orig[i*4+1],b=orig[i*4+2];
+      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+      const sat=mx===0?0:(mx-mn)/mx, lum=(r+g+b)/3;
+      return sat<0.22 && lum>=floor; };
+    while(sp2){ const i=st2[--sp2], x=i%W, y=(i/W)|0;
+      const tryp=(j)=>{ if(grayOk(j)){removed[j]=1; st2[sp2++]=j;} };
+      if(x>0)tryp(i-1); if(x<W-1)tryp(i+1); if(y>0)tryp(i-W); if(y<H-1)tryp(i+W); }
+  }
+
+  // (3) キャラの内側に閉じ込められた背景（羽の間など）を消す
+  if(params.inner>0){
+    const innerTol=16+params.inner*0.55;
+    const seen=new Uint8Array(n);
+    let charArea=0; for(let i=0;i<n;i++) if(!removed[i]&&orig[i*4+3]>=8) charArea++;
+    const maxComp=Math.max(60, charArea*0.06);   // 大きい塊（お腹など）は守る
+    const comp=new Int32Array(n);
+    for(let i=0;i<n;i++){
+      if(seen[i]||removed[i]) continue;
+      const r=orig[i*4],g=orig[i*4+1],b=orig[i*4+2];
+      let dm=1e9; for(const s of seeds){const dr=r-s[0],dg=g-s[1],db=b-s[2];const d=dr*dr+dg*dg+db*db;if(d<dm)dm=d;}
+      if(orig[i*4+3]<8 || dm>innerTol*innerTol){ seen[i]=1; continue; }
+      // 背景色っぽいかたまりを連結成分として集める
+      let cp=0,head=0; comp[cp++]=i; seen[i]=1; let touchBorder=false;
+      while(head<cp){ const p=comp[head++]; const x=p%W,y=(p/W)|0;
+        if(x===0||y===0||x===W-1||y===H-1) touchBorder=true;
+        const nb=(q)=>{ if(q<0||q>=n||seen[q]||removed[q])return;
+          const rr=orig[q*4],gg=orig[q*4+1],bb=orig[q*4+2];
+          let d2=1e9; for(const s of seeds){const dr=rr-s[0],dg=gg-s[1],db=bb-s[2];const d=dr*dr+dg*dg+db*db;if(d<d2)d2=d;}
+          if(orig[q*4+3]>=8 && d2<=innerTol*innerTol){ seen[q]=1; comp[cp++]=q; } };
+        if(x>0)nb(p-1); if(x<W-1)nb(p+1); if(y>0)nb(p-W); if(y<H-1)nb(p+W);
+      }
+      if(!touchBorder && cp<=maxComp){ for(let k=0;k<cp;k++) removed[comp[k]]=1; }
+    }
+  }
+
+  // (5) 輪郭に残った背景色を、近くのキャラ色へ寄せて白いふちを減らす
+  const edgeLayers=Math.round(params.edgeShrink/26);   // 0〜約4
+  // まず色を寄せる（消す前の境界の色を直す）
+  if(params.edgeShrink>0){
+    const declist=[];
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(removed[i]||orig[i*4+3]<8)continue;
+      let nearRemoved=false;
+      if(x>0&&removed[i-1])nearRemoved=true; else if(x<W-1&&removed[i+1])nearRemoved=true;
+      else if(y>0&&removed[i-W])nearRemoved=true; else if(y<H-1&&removed[i+W])nearRemoved=true;
+      if(!nearRemoved)continue;
+      if(isBg(i,tol*1.4)) declist.push(i);
+    }
+    for(const i of declist){ const x=i%W,y=(i/W)|0; let rr=0,gg=0,bb=0,c=0;
+      for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){ const nx=x+dx,ny=y+dy;
+        if(nx<0||ny<0||nx>=W||ny>=H)continue; const j=ny*W+nx;
+        if(removed[j]||orig[j*4+3]<8)continue; if(isBg(j,tol*1.4))continue;
+        rr+=orig[j*4];gg+=orig[j*4+1];bb+=orig[j*4+2];c++; }
+      if(c>0){ work[i*4]=rr/c; work[i*4+1]=gg/c; work[i*4+2]=bb/c; }
+    }
+  }
+
+  // アルファを書き込む
+  for(let i=0;i<n;i++) work[i*4+3]= removed[i]?0:orig[i*4+3];
+
+  // 白いふちを削る（輪郭を少しだけ内側へ）
+  for(let l=0;l<edgeLayers;l++){
+    const cut=[];
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(work[i*4+3]===0)continue;
+      if((x>0&&work[(i-1)*4+3]===0)||(x<W-1&&work[(i+1)*4+3]===0)||
+         (y>0&&work[(i-W)*4+3]===0)||(y<H-1&&work[(i+W)*4+3]===0)) cut.push(i); }
+    for(const i of cut) work[i*4+3]=0;
+  }
+
+  // (small) 小さな背景の残り（浮いた小さな塊）を消す。一番大きいキャラ本体は必ず残す。
+  if(params.despeckle>0){
+    const minArea=8+params.despeckle*3;
+    const seen=new Uint8Array(n); const comp=new Int32Array(n); const comps=[];
+    for(let i=0;i<n;i++){ if(seen[i]||work[i*4+3]===0)continue;
+      let cp=0,head=0; comp[cp++]=i; seen[i]=1;
+      const members=[];
+      while(head<cp){ const p=comp[head++]; members.push(p); const x=p%W,y=(p/W)|0;
+        const nb=q=>{ if(q<0||q>=n||seen[q]||work[q*4+3]===0)return; seen[q]=1; comp[cp++]=q; };
+        if(x>0)nb(p-1); if(x<W-1)nb(p+1); if(y>0)nb(p-W); if(y<H-1)nb(p+W); }
+      comps.push(members);
+    }
+    if(comps.length){ let big=0; for(let k=1;k<comps.length;k++) if(comps[k].length>comps[big].length) big=k;
+      comps.forEach((m,k)=>{ if(k!==big && m.length<minArea) for(const p of m) work[p*4+3]=0; });
+    }
+  }
+  busy(false);
+}
+
+// 自動結果に手直しを重ねて最終画像を作る
+function composeFinal(){
+  const n=imgW*imgH; const out=cctx.createImageData(imgW,imgH); const d=out.data;
+  d.set(work);
+  for(let i=0;i<n;i++){
+    if(manual[i]===1){ d[i*4+3]=0; }
+    else if(manual[i]===2){ d[i*4]=orig[i*4];d[i*4+1]=orig[i*4+1];d[i*4+2]=orig[i*4+2];d[i*4+3]=orig[i*4+3]; }
+  }
+  cctx.putImageData(out,0,0);
+}
+
+// ===== 表示 =====
+function fitView(){
+  const st=$('stage'); const pad=40;
+  const sx=(st.clientWidth-pad)/imgW, sy=(st.clientHeight-pad)/imgH;
+  scale=Math.min(sx,sy,1); if(!isFinite(scale)||scale<=0)scale=1;
+  offX=(st.clientWidth-imgW*scale)/2; offY=(st.clientHeight-imgH*scale)/2;
+}
+function draw(){
+  const st=$('stage'); view.width=st.clientWidth; view.height=st.clientHeight;
+  vctx.clearRect(0,0,view.width,view.height);
+  vctx.imageSmoothingEnabled = scale<=1.4;
+  vctx.drawImage(composite, offX, offY, imgW*scale, imgH*scale);
+}
+window.addEventListener('resize',()=>{ if(orig){ draw(); }});
+
+// ===== 履歴 =====
+function pushHistory(){
+  undoStack.push({ manual:manual.slice(), userSeeds:JSON.parse(JSON.stringify(userSeeds)), params:{...params} });
+  if(undoStack.length>40) undoStack.shift();
+  redoStack=[];
+}
+function applySnapshot(s){
+  manual=s.manual.slice(); userSeeds=JSON.parse(JSON.stringify(s.userSeeds));
+  Object.assign(params,s.params); syncSliders(); renderSeeds();
+  computeAuto(); composeFinal(); draw();
+}
+$('btnUndo').onclick=()=>{ if(!undoStack.length)return;
+  redoStack.push({manual:manual.slice(),userSeeds:JSON.parse(JSON.stringify(userSeeds)),params:{...params}});
+  applySnapshot(undoStack.pop()); };
+$('btnRedo').onclick=()=>{ if(!redoStack.length)return;
+  undoStack.push({manual:manual.slice(),userSeeds:JSON.parse(JSON.stringify(userSeeds)),params:{...params}});
+  applySnapshot(redoStack.pop()); };
+$('btnReset').onclick=()=>{ if(!orig)return; pushHistory();
+  manual.fill(0); userSeeds=[]; autoSeeds=detectSeeds();
+  params.bgStrength=45;params.edgeShrink=25;params.despeckle=20;params.inner=15;params.shadow=0;
+  syncSliders(); renderSeeds(); computeAuto(); composeFinal(); draw(); };
+
+function syncSliders(){
+  $('sBg').value=params.bgStrength; $('sEdge').value=params.edgeShrink;
+  $('sSpeck').value=params.despeckle; $('sInner').value=params.inner; $('sShadow').value=params.shadow;
+}
+
+// ===== 入力：ファイル =====
+$('drop').onclick=()=>$('file').click();
+$('file').onchange=e=>loadFile(e.target.files[0]);
+['dragenter','dragover'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.remove('hot');}));
+$('drop').addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f)loadFile(f); });
+document.body.addEventListener('dragover',e=>e.preventDefault());
+document.body.addEventListener('drop',e=>{ e.preventDefault(); if(!orig&&e.dataTransfer.files[0])loadFile(e.dataTransfer.files[0]); });
+
+// ===== ボタン =====
+$('btnAuto').onclick=()=>{ if(!orig){alert('先に画像を選んでください');return;}
+  pushHistory(); computeAuto(); composeFinal(); draw();
+  $('hint').textContent='消え方を見て、右の調整スライダーで仕上げてください'; };
+
+$('btnPick').onclick=()=>{ pickMode=!pickMode; $('btnPick').classList.toggle('on',pickMode);
+  $('hint').textContent= pickMode?'消したい背景を画像の上でクリック':'マウスホイールで拡大縮小・ドラッグで移動'; };
+
+// スライダー（少し待ってから再計算）
+let deb=null;
+function onSlider(){ clearTimeout(deb); deb=setTimeout(()=>{ computeAuto(); composeFinal(); draw(); }, 90); }
+$('sBg').oninput=e=>{params.bgStrength=+e.target.value;onSlider();};
+$('sEdge').oninput=e=>{params.edgeShrink=+e.target.value;onSlider();};
+$('sSpeck').oninput=e=>{params.despeckle=+e.target.value;onSlider();};
+$('sInner').oninput=e=>{params.inner=+e.target.value;onSlider();};
+$('sShadow').oninput=e=>{params.shadow=+e.target.value;onSlider();};
+// スライダーを動かす直前の状態を1回だけ履歴に残す（「元に戻す」で戻せるように）
+['sBg','sEdge','sSpeck','sInner','sShadow'].forEach(id=>{
+  $(id).addEventListener('pointerdown',()=>{ if(orig) pushHistory(); });
+});
+
+// 道具の切り替え
+document.querySelectorAll('#tools button').forEach(b=>b.onclick=()=>{
+  tool=b.dataset.tool; document.querySelectorAll('#tools button').forEach(x=>x.classList.toggle('on',x===b));
+  $('hint').textContent = tool==='move'?'マウスホイールで拡大縮小・ドラッグで移動'
+    : tool==='erase'?'なぞると消えます（移動はスペースキーを押しながら）'
+    : 'なぞると元に戻ります（移動はスペースキーを押しながら）';
+});
+$('sBrush').oninput=e=>brush=+e.target.value;
+
+// プレビュー背景
+document.querySelectorAll('#previewBgs button').forEach(b=>b.onclick=()=>{
+  previewBg=b.dataset.bg; document.querySelectorAll('#previewBgs button').forEach(x=>x.classList.toggle('on',x===b));
+  const vp=$('viewport'); vp.className=''; vp.classList.add('bg-'+previewBg);
+});
+
+// ===== マウス操作（拡大・移動・ブラシ・背景クリック）=====
+let dragging=false, panning=false, lastX=0,lastY=0, painting=false, spaceDown=false;
+window.addEventListener('keydown',e=>{ if(e.code==='Space')spaceDown=true; });
+window.addEventListener('keyup',e=>{ if(e.code==='Space')spaceDown=false; });
+
+function toImg(ev){ const r=view.getBoundingClientRect();
+  const x=(ev.clientX-r.left-offX)/scale, y=(ev.clientY-r.top-offY)/scale;
+  return {x:Math.floor(x), y:Math.floor(y)}; }
+
+view.addEventListener('wheel',e=>{ if(!orig)return; e.preventDefault();
+  const r=view.getBoundingClientRect(); const mx=e.clientX-r.left, my=e.clientY-r.top;
+  const ix=(mx-offX)/scale, iy=(my-offY)/scale;
+  const f=e.deltaY<0?1.12:1/1.12; scale=Math.max(0.05,Math.min(20,scale*f));
+  offX=mx-ix*scale; offY=my-iy*scale; draw();
+},{passive:false});
+
+view.addEventListener('pointerdown',e=>{ if(!orig)return; view.setPointerCapture(e.pointerId);
+  lastX=e.clientX; lastY=e.clientY;
+  if(pickMode){ const p=toImg(e); if(p.x>=0&&p.y>=0&&p.x<imgW&&p.y<imgH){
+      const i=(p.y*imgW+p.x)*4; pushHistory(); userSeeds.push([orig[i],orig[i+1],orig[i+2]]);
+      pickMode=false;$('btnPick').classList.remove('on'); renderSeeds(); computeAuto();composeFinal();draw();
+      $('hint').textContent='背景色を追加しました'; } return; }
+  if(tool==='move'||spaceDown){ panning=true; }
+  else { painting=true; pushHistory(); paintAt(e); }
+});
+view.addEventListener('pointermove',e=>{ if(!orig)return;
+  if(panning){ offX+=e.clientX-lastX; offY+=e.clientY-lastY; lastX=e.clientX;lastY=e.clientY; draw(); }
+  else if(painting){ paintAt(e); }
+});
+view.addEventListener('pointerup',e=>{ panning=false; if(painting){painting=false; composeFinal(); draw();} });
+
+function paintAt(ev){ const p=toImg(ev); const rad=brush/2/scale;
+  const v= tool==='erase'?1: tool==='restore'?2:0; if(!v)return;
+  const x0=Math.max(0,Math.floor(p.x-rad)), x1=Math.min(imgW-1,Math.ceil(p.x+rad));
+  const y0=Math.max(0,Math.floor(p.y-rad)), y1=Math.min(imgH-1,Math.ceil(p.y+rad));
+  const r2=rad*rad;
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){ const dx=x-p.x,dy=y-p.y;
+    if(dx*dx+dy*dy<=r2) manual[y*imgW+x]=v; }
+  // 描画中は composite を部分更新（軽く）
+  composeFinal(); draw();
+}
+
+// ===== 保存 =====
+$('btnSave').onclick=()=>{ if(!orig){alert('先に画像を選んでください');return;}
+  composeFinal();
+  // 透明の割合を確認
+  const d=cctx.getImageData(0,0,imgW,imgH).data; let tr=0; const n=imgW*imgH;
+  for(let i=0;i<n;i++) if(d[i*4+3]<8) tr++;
+  const pct=Math.round(tr/n*100);
+  composite.toBlob(b=>{ const a=document.createElement('a');
+    a.download=fileBaseName+'_透明.png'; a.href=URL.createObjectURL(b); a.click();
+    const note=$('savedNote'); note.style.display='block';
+    note.textContent=`保存しました：${fileBaseName}_透明.png（透明な部分 ${pct}%）`;
+  },'image/png');
+};
+
+// 自動化/デバッグ用
+window.app={ loadURL, runAuto:()=>{computeAuto();composeFinal();draw();},
+  transparentRatio:()=>{ const d=cctx.getImageData(0,0,imgW,imgH).data;let tr=0;const n=imgW*imgH;
+    for(let i=0;i<n;i++) if(d[i*4+3]<8)tr++; return tr/n; },
+  state:()=>({imgW,imgH,autoSeeds,userSeeds,params}) };
+
+function busy(on){ $('busy').style.display=on?'block':'none'; }
+</script>
+</body>
+</html>

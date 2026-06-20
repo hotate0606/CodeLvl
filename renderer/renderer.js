@@ -279,7 +279,19 @@ loadSheet('./assets/モーション/ニシアフ最終進化あくび2.png', dot
 loadSheet('./assets/モーション/ニシアフ最終進化あくび3.png', dotFrames.gecko.yawn[2].gold,  { cols: 10, rows: 1, count: 10, dotW: NATIVE_RES });
 loadSheet('./assets/モーション/ニシアフ最終進化待機1.png', dotFrames.gecko.idleAnim[2].green, { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
 loadSheet('./assets/モーション/ニシアフ最終進化待機2.png', dotFrames.gecko.idleAnim[2].blue,  { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
-loadSheet('./assets/モーション/ニシアフ最終進化待機3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 11, rows: 1, count: 11, dotW: NATIVE_RES });
+// 【骨組み＋スプライト方式テスト】ゴールド最終進化のみ：体はコマ0で静止させ、
+// 自動検出した目領域にまぶたを合成した「瞬き」4コマシートに置換（呼吸は一旦なし）。
+// 生成は tools/eye-blink-gen.js（全コマ同一体＝目だけ変化するのでloadSheetで完全整列）。
+loadSheet('./assets/モーション/ニシアフ最終進化瞬き3.png', dotFrames.gecko.idleAnim[2].gold,  { cols: 4, rows: 1, count: 4, dotW: NATIVE_RES });
+
+// 【止め絵差し替えテスト】ゴールド最終進化の待機：上の瞬きシートではなく、
+// 「最終進化ニシアフ.png」の紫背景を抜いて切り出した1枚絵（最終進化金.png＝右端の個体）を
+// idle[gold][2]（=最終進化の止め絵）として使う。動きは手続きアニメ（呼吸・スウェイ）で付ける。
+// 透過済み素材なのでloadDotSpriteのflood-fillは無害、keepLargestComponentで体を確定。native高精細。
+// 並びは元画像の左=緑 / 中=青 / 右=金（既存シートの 1=green/2=blue/3=gold と同順）。
+loadDotSprite('./assets/ニシアフ/最終進化緑.png', dotFrames.gecko.idle.green, 2, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/最終進化青.png', dotFrames.gecko.idle.blue,  2, NATIVE_RES);
+loadDotSprite('./assets/ニシアフ/最終進化金.png', dotFrames.gecko.idle.gold,  2, NATIVE_RES);
 
 // ベビー待機（6コマ。行=色の混載シートを分割→シームレス化のため孤立コマを除き並べ替え済み。1=green/2=blue/3=gold）
 loadSheet('./assets/モーション/ニシアフ待機1.png', dotFrames.gecko.idleAnim[0].green, { cols: 6, rows: 1, count: 6, dotW: NATIVE_RES });
@@ -600,6 +612,8 @@ function drawCreatureSprite(now, alpha = 1) {
   const stage = Math.min(evolutionStage, dotFrames.gecko.yawn.length - 1);
 
   let dotImg, dW, dH, anchorX, anchorY, shadowW;
+  // 手続きアニメ（①）用の変形量。既定は無変形。足元固定で適用される。
+  let procSX = 1, procSY = 1, procBobY = 0, procRot = 0;
   if (yset) {
     // 全コマ同一サイズの共通キャンバスなので、コマ間でサイズは全くブレない。
     // ただしシート間（待機⇔あくび）はコマ0のbboxが違う（尻尾・翼のポーズ差）ため、
@@ -629,7 +643,42 @@ function drawCreatureSprite(now, alpha = 1) {
     //   3) 静止idle画像（ベビー、またはシート未ロード時のフォールバック）
     const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
     const ys = stage >= 1 ? yawnSetFor(stage, pal) : null;
-    if (ia && ia.frames.length && ia.refW) {
+    // 最終進化の止め絵（紫背景を抜いた1枚絵 idle[pal][2]）があれば最優先で使う。
+    // 体は1枚絵で固定し、動きは手続きアニメ（呼吸 squash&stretch・上下バウンス・左右スウェイ）で出す。
+    const idle2 = stage === 2 && dotFrames.gecko.idle[pal] && dotFrames.gecko.idle[pal][2];
+    if (idle2) {
+      dotImg = idle2;
+      const br = Math.sin(now * 1.6);
+      procSY   = 1 + 0.045 * br;
+      procSX   = 1 - 0.022 * br;
+      procBobY = Math.sin(now * 1.6 + 0.6) * 2;
+      procRot  = Math.sin(now * 0.85) * 0.04;
+      const scale = baseW / dotImg.width; // native：体の全幅(翼・尾含む)を baseW にマップ
+      dW = dotImg.width * scale; dH = dotImg.height * scale;
+      anchorX = dW / 2; anchorY = dH;
+      shadowW = baseW;
+    } else if (ia && ia.frames.length && ia.refW) {
+      if (stage === 2 && pal === 'gold') {
+        // 【①手続きアニメ 試作：ゴールド最終進化】
+        // 体は止め絵（瞬きシートの目状態だけ差し替え）。動きはCanvas変形で出す。
+        //   呼吸：squash & stretch（足元固定で体高が伸び縮み）
+        //   バウンス：呼吸と位相差をつけた上下ゆれ
+        //   スウェイ：足元支点のごく浅い左右回転
+        //   瞬き：基本コマ0(開)。周期的に 半→閉→半 を素早く差し替え
+        const BLINK_PERIOD = 4.4, BLINK_DUR = 0.34; // 瞬き間隔・所要時間（秒）
+        const bt = now % BLINK_PERIOD;
+        let fi = 0;
+        if (bt < BLINK_DUR && ia.frames.length >= 4) {
+          const seq = [1, 2, 3]; // 半→閉→半
+          fi = seq[Math.min(seq.length - 1, Math.floor(bt / BLINK_DUR * seq.length))];
+        }
+        dotImg = ia.frames[fi];
+        const br = Math.sin(now * 1.6);          // 呼吸の位相（周期≒3.9秒）
+        procSY   = 1 + 0.045 * br;               // 縦に伸び縮み
+        procSX   = 1 - 0.022 * br;               // 横は逆位相で体積感を保つ
+        procBobY = Math.sin(now * 1.6 + 0.6) * 2; // 上下バウンス（view px）
+        procRot  = Math.sin(now * 0.85) * 0.04;   // 左右スウェイ（rad）
+      } else {
       // 1サイクル（呼吸＋瞬き）を再生したら、コマ0（目開き）で IDLE_REST 秒静止してから
       // 次のサイクルへ。これで瞬きの間隔が空き、自然な見え方になる（瞬き回数を減らす）。
       const IDLE_ANIM_FPS = 6;  // コマ送りの速さ
@@ -638,6 +687,7 @@ function drawCreatureSprite(now, alpha = 1) {
       const t = now % (playDur + IDLE_REST);
       const fi = t < playDur ? Math.floor(t * IDLE_ANIM_FPS) : 0; // 再生中はコマ送り／静止中はコマ0
       dotImg = ia.frames[fi];
+      }
       const scale = baseW / ia.refW;
       dW = dotImg.width * scale; dH = dotImg.height * scale;
       anchorX = dW / 2; anchorY = dH;
@@ -687,8 +737,9 @@ function drawCreatureSprite(now, alpha = 1) {
   vctx.globalAlpha = alpha;
   vctx.imageSmoothingEnabled = true;
   vctx.imageSmoothingQuality = 'high';
-  vctx.translate(pivX + shakeX, pivY + offs.dy + shakeY);
-  vctx.rotate(offs.rot * 0.5 + shakeRot);
+  vctx.translate(pivX + shakeX, pivY + offs.dy + shakeY + procBobY);
+  vctx.rotate(offs.rot * 0.5 + shakeRot + procRot);
+  vctx.scale(procSX, procSY); // 足元(原点)基準で拡縮 → 呼吸の squash & stretch
   vctx.drawImage(dotImg, -anchorX, -anchorY, dW, dH);
   vctx.restore();
 }

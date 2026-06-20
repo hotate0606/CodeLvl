@@ -1,0 +1,179 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ゴールド最終進化 プレビュー（いま使ってるモーション）</title>
+<style>
+  body{margin:0;background:#1a1330;color:#eee;font-family:system-ui,'Segoe UI',sans-serif;
+       min-height:100vh;display:flex;align-items:center;justify-content:flex-end;
+       gap:40px;padding:24px 48px;box-sizing:border-box}
+  .info{max-width:340px}
+  h1{font-size:16px;font-weight:600;margin:0 0 10px}
+  p{font-size:13px;line-height:1.7;opacity:.8;margin:0}
+  .stage{background:linear-gradient(#3a2d63,#221a40);border-radius:16px;padding:14px;
+         box-shadow:inset 0 0 36px rgba(0,0,0,.45)}
+  canvas{display:block}
+  .cap{font-size:12px;opacity:.7;text-align:center;margin-top:8px}
+</style>
+
+<div class="info">
+  <h1>ゴールド 最終進化</h1>
+  <p>いまアプリで使っているモーションと同じ描画です。<br>
+     瞬きシート（4コマ）を体の止め絵にして、Canvas変形で
+     呼吸（squash&amp;stretch）・上下バウンス・左右スウェイを足し、
+     周期的に半→閉→半のコマへ差し替えて瞬きさせています。</p>
+</div>
+
+<div>
+  <div class="stage"><canvas id="c" width="280" height="320"></canvas></div>
+  <div class="cap">ニシアフ最終進化瞬き3.png ＋ 手続きアニメ</div>
+</div>
+
+<script>
+// ===== renderer.js から該当ロジックを移植 =====
+const SHEET = '../renderer/assets/モーション/ニシアフ最終進化瞬き3.png';
+const COLS = 4, ROWS = 1, COUNT = 4, BG_TOL = 70;
+
+function keepLargestComponent(d, w, h) {
+  const vis = new Uint8Array(w * h);
+  const components = [];
+  for (let sy = 0; sy < h; sy++) for (let sx = 0; sx < w; sx++) {
+    const idx = sy * w + sx;
+    if (vis[idx] || d[idx * 4 + 3] < 30) { vis[idx] = 1; continue; }
+    const pixels = [], stk = [idx];
+    while (stk.length) {
+      const p = stk.pop();
+      if (p < 0 || p >= w * h || vis[p]) continue;
+      vis[p] = 1;
+      if (d[p * 4 + 3] < 30) continue;
+      pixels.push(p);
+      const px = p % w, py = (p / w) | 0;
+      if (px > 0) stk.push(p-1); if (px < w-1) stk.push(p+1);
+      if (py > 0) stk.push(p-w); if (py < h-1) stk.push(p+w);
+    }
+    if (pixels.length > 0) components.push(pixels);
+  }
+  if (components.length === 0) return;
+  const largest = components.reduce((a, b) => a.length > b.length ? a : b);
+  const keep = new Uint8Array(w * h);
+  for (const p of largest) keep[p] = 1;
+  for (let p = 0; p < w * h; p++) if (!keep[p]) d[p * 4 + 3] = 0;
+}
+
+function floodFillTransparent(d, w, h, seeds, tol) {
+  for (const [sx, sy] of seeds) {
+    const si = (sy * w + sx) * 4;
+    if (d[si + 3] === 0) continue;
+    const r = d[si], gg = d[si+1], b = d[si+2];
+    const vis = new Uint8Array(w * h);
+    const stk = [sx, sy];
+    while (stk.length) {
+      const y = stk.pop(), x = stk.pop();
+      if (x < 0 || x >= w || y < 0 || y >= h) continue;
+      const idx = y * w + x;
+      if (vis[idx]) continue;
+      vis[idx] = 1;
+      const i = idx * 4;
+      if (d[i+3] === 0) { stk.push(x-1,y, x+1,y, x,y-1, x,y+1); continue; }
+      const dr=d[i]-r, dg=d[i+1]-gg, db=d[i+2]-b;
+      if (dr*dr + dg*dg + db*db <= tol*tol) { d[i+3]=0; stk.push(x-1,y, x+1,y, x,y-1, x,y+1); }
+    }
+  }
+}
+
+// 全コマ同一サイズの共通キャンバスへ整列（renderer.js buildSheetFrames と同等。dotW=native）
+function buildSheetFrames(img) {
+  const cw = Math.floor(img.naturalWidth / COLS);
+  const ch = Math.floor(img.naturalHeight / ROWS);
+  const inset = 4;
+  const processed = [];
+  for (let i = 0; i < COUNT; i++) {
+    const gx = i % COLS, gy = (i / COLS) | 0;
+    const x0 = gx * cw + inset, y0 = gy * ch + inset;
+    const w = cw - inset * 2, h = ch - inset * 2;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const cx = c.getContext('2d');
+    cx.imageSmoothingEnabled = false;
+    cx.drawImage(img, x0, y0, w, h, 0, 0, w, h);
+    const id = cx.getImageData(0, 0, w, h);
+    const d = id.data;
+    floodFillTransparent(d, w, h, [[0,0],[w-1,0],[0,h-1],[w-1,h-1]], BG_TOL);
+    keepLargestComponent(d, w, h);
+    cx.putImageData(id, 0, 0);
+    let minX = w, minY = h, maxX = -1, maxY = -1, area = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (d[(y*w+x)*4+3] > 0) {
+        if (x<minX) minX=x; if (x>maxX) maxX=x;
+        if (y<minY) minY=y; if (y>maxY) maxY=y;
+        if (d[(y*w+x)*4+3] > 30) area++;
+      }
+    }
+    processed.push({ canvas: c, minX, minY, bw: maxX-minX+1, bh: maxY-minY+1, area: area || 1 });
+  }
+  if (!processed.length || processed[0].bw <= 0) return null;
+  const scale = 1; // native（縮小なし）
+  for (const p of processed) p.fscale = scale * Math.sqrt(processed[0].area / p.area);
+  let maxSW = 0, maxSH = 0;
+  for (const p of processed) { maxSW = Math.max(maxSW, p.bw*p.fscale); maxSH = Math.max(maxSH, p.bh*p.fscale); }
+  const outW = Math.ceil(maxSW) + 2, outH = Math.ceil(maxSH) + 2;
+  const frames = processed.map((p) => {
+    const sw = p.bw * p.fscale, sh = p.bh * p.fscale;
+    const o = document.createElement('canvas');
+    o.width = outW; o.height = outH;
+    const oc = o.getContext('2d');
+    oc.imageSmoothingEnabled = true; oc.imageSmoothingQuality = 'high';
+    oc.drawImage(p.canvas, p.minX, p.minY, p.bw, p.bh, (outW-sw)/2, outH-sh, sw, sh);
+    return o;
+  });
+  return { frames, refW: Math.round(processed[0].bw * scale) };
+}
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let set = null;
+
+function shadow(g, cx, cy, r) {
+  g.save(); g.globalAlpha = 0.2; g.fillStyle = '#1a1025';
+  g.beginPath(); g.ellipse(cx, cy, r, 5, 0, 0, Math.PI*2); g.fill(); g.restore();
+}
+
+function frame(ts) {
+  const now = ts / 1000;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (set && set.frames.length) {
+    const baseW = 100 * 1.25;            // SPRITES.gecko stage2 scale = 1.25
+    const scale = baseW / set.refW;
+    const footX = cv.width / 2, footY = cv.height - 24;
+
+    // ===== renderer.js drawCreatureSprite のゴールド最終進化ブランチと同一 =====
+    const BLINK_PERIOD = 4.4, BLINK_DUR = 0.34;
+    const bt = now % BLINK_PERIOD;
+    let fi = 0;
+    if (bt < BLINK_DUR && set.frames.length >= 4) {
+      const seq = [1, 2, 3];
+      fi = seq[Math.min(seq.length - 1, Math.floor(bt / BLINK_DUR * seq.length))];
+    }
+    const dotImg = set.frames[fi];
+    const br = Math.sin(now * 1.6);
+    const procSY = 1 + 0.045 * br;
+    const procSX = 1 - 0.022 * br;
+    const procBobY = Math.sin(now * 1.6 + 0.6) * 2;
+    const procRot = Math.sin(now * 0.85) * 0.04;
+
+    const dW = dotImg.width * scale, dH = dotImg.height * scale;
+    shadow(ctx, footX, footY, baseW * 0.4);
+    ctx.save();
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.translate(footX, footY + procBobY);
+    ctx.rotate(procRot);
+    ctx.scale(procSX, procSY); // 足元(原点)基準
+    ctx.drawImage(dotImg, -dW/2, -dH, dW, dH);
+    ctx.restore();
+  }
+  requestAnimationFrame(frame);
+}
+
+const img = new Image();
+img.onload = () => { set = buildSheetFrames(img); };
+img.src = SHEET;
+requestAnimationFrame(frame);
+</script>
