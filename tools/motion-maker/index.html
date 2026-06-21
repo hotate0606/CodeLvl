@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>かんたんモーションメーカー</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- 上部バー：大きいボタン -->
+  <header class="topbar">
+    <h1>かんたんモーションメーカー</h1>
+    <div class="top-actions">
+      <button id="btnLoad" class="big primary">画像を読み込む</button>
+      <button id="btnPlay" class="big">▶ プレビュー再生</button>
+      <button id="btnSaveSheet" class="big">スプライトシートを保存</button>
+    </div>
+    <input id="fileInput" type="file" accept="image/png,image/*" hidden />
+  </header>
+
+  <!-- 手順の案内 -->
+  <ol class="steps">
+    <li class="step on" data-step="1">① 画像を読み込む</li>
+    <li class="step" data-step="2">② 動きを選ぶ</li>
+    <li class="step" data-step="3">③ 場所を選ぶ（必要なとき）</li>
+    <li class="step" data-step="4">④ 強さを調整</li>
+    <li class="step" data-step="5">⑤ 再生で確認</li>
+    <li class="step" data-step="6">⑥ 保存</li>
+  </ol>
+
+  <main class="layout">
+    <!-- 左：プレビュー -->
+    <section class="left">
+      <div id="previewWrap" class="preview-wrap">
+        <canvas id="preview"></canvas>
+      </div>
+      <div class="zoom-row">
+        <label>拡大</label>
+        <input id="zoom" type="range" min="50" max="300" value="100" />
+      </div>
+      <p id="hint" class="hint">まず「画像を読み込む」から PNG を読み込みましょう。</p>
+    </section>
+
+    <!-- 右：設定パネル -->
+    <aside class="right">
+      <div class="panel">
+        <h2>1. 動きを選ぶ</h2>
+        <div id="motionList" class="motion-list"></div>
+      </div>
+
+      <div class="panel" id="regionRow" style="display:none">
+        <h2>2. 動かす場所を選ぶ</h2>
+        <div class="region-actions">
+          <button id="btnSelect" class="sub">範囲を選ぶ（ドラッグ）</button>
+          <button id="btnClearRegion" class="sub ghost">やり直す</button>
+        </div>
+        <p id="regionState" class="small">範囲：未指定</p>
+      </div>
+
+      <div class="panel">
+        <h2>3. 調整</h2>
+
+        <label class="ctrl-label">コマ数</label>
+        <div class="frame-row">
+          <button class="frame-btn" data-n="5">5</button>
+          <button class="frame-btn active" data-n="6">6</button>
+          <button class="frame-btn" data-n="8">8</button>
+          <button class="frame-btn" data-n="10">10</button>
+          <button class="frame-btn" data-n="12">12</button>
+        </div>
+
+        <label class="ctrl-label">動きの強さ <span id="strengthVal">35</span></label>
+        <input id="strength" type="range" min="0" max="100" value="35" />
+
+        <label class="ctrl-label">再生の速さ（コマ/秒） <span id="fpsVal">12</span></label>
+        <input id="fps" type="range" min="2" max="24" value="12" />
+      </div>
+
+      <div class="panel">
+        <h2>4. 保存</h2>
+        <button id="btnSaveEach" class="sub ghost full">各コマを個別PNGで保存</button>
+        <p class="small">※「スプライトシートを保存」は上の大きいボタンから。背景は透明のまま書き出します。</p>
+      </div>
+    </aside>
+  </main>
+
+  <!-- 読み込み順：依存の少ないものから -->
+  <script src="js/motions.js"></script>
+  <script src="js/frames.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/exporter.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
