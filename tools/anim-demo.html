@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>育成ゲーム風モーション デモ（画像1枚から）</title>
+<style>
+  body{margin:0;background:#1a1330;color:#eee;font-family:system-ui,'Segoe UI',sans-serif;
+       display:flex;flex-direction:column;align-items:center;gap:14px;padding:20px}
+  h1{font-size:16px;font-weight:600;margin:4px 0;opacity:.9}
+  .row{display:flex;gap:28px;align-items:flex-end}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .cap{font-size:13px;opacity:.8}
+  .stage{background:linear-gradient(#3a2d63,#221a40);border-radius:14px;padding:10px;
+         box-shadow:inset 0 0 30px rgba(0,0,0,.4)}
+  canvas{display:block;image-rendering:auto}
+  .ctl{display:flex;gap:18px;align-items:center;font-size:13px;opacity:.85;margin-top:6px}
+  label{display:flex;gap:6px;align-items:center}
+</style>
+<h1>同じ「1枚絵」から：止め絵　vs　手続きアニメ（呼吸＋スウェイ＋瞬き）</h1>
+<div class="row">
+  <div class="cell"><div class="stage"><canvas id="a" width="240" height="280"></canvas></div><div class="cap">① 止め絵（今までのコマ送りで静止中の状態）</div></div>
+  <div class="cell"><div class="stage"><canvas id="b" width="240" height="280"></canvas></div><div class="cap">② 画像1枚＋手続きアニメ</div></div>
+</div>
+<div class="ctl">
+  <label><input type="checkbox" id="breathe" checked>呼吸（squash&stretch）</label>
+  <label><input type="checkbox" id="sway" checked>スウェイ（左右ゆらぎ）</label>
+  <label><input type="checkbox" id="bob" checked>上下バウンス</label>
+  <label><input type="checkbox" id="blink" checked>瞬き</label>
+</div>
+
+<script>
+const img = new Image();
+img.src = './_eye/f0.png';          // ゴールド最終進化の体（1枚）
+const EYE = { x:26, y:76, w:22, h:14 }; // 自動検出した目領域（191x216基準）
+const ca = document.getElementById('a'), cb = document.getElementById('b');
+const ga = ca.getContext('2d'), gb = cb.getContext('2d');
+
+function drawStatic(g, cv){
+  g.clearRect(0,0,cv.width,cv.height);
+  const s = (cv.height-30) / img.height;
+  const w = img.width*s, h = img.height*s;
+  g.imageSmoothingQuality='high';
+  shadow(g, cv.width/2, cv.height-18, w*0.34);
+  g.drawImage(img, cv.width/2-w/2, cv.height-18-h, w, h);
+}
+
+function shadow(g,cx,cy,r){ g.save(); g.globalAlpha=.25; g.fillStyle='#0c0820';
+  g.beginPath(); g.ellipse(cx,cy,r,r*0.16,0,0,7); g.fill(); g.restore(); }
+
+function drawAlive(g, cv, t){
+  g.clearRect(0,0,cv.width,cv.height);
+  const baseS = (cv.height-30) / img.height;
+  const footX = cv.width/2, footY = cv.height-18;
+
+  // ① 呼吸：volume保存の squash & stretch（足元固定）
+  let sx=1, sy=1;
+  if (breathe.checked){ const k=Math.sin(t*1.7); sy=1+0.035*k; sx=1-0.018*k; }
+  // ③ 上下バウンス（呼吸とわずかに位相差）
+  const dy = bob.checked ? Math.sin(t*1.7+0.6)*3 : 0;
+  // ② スウェイ：足元支点のごく浅い回転＋重心の横移動
+  const rot = sway.checked ? Math.sin(t*0.9)*0.045 : 0;
+
+  shadow(g, footX, footY, img.width*baseS*0.34*sx);
+
+  g.save();
+  g.translate(footX, footY+dy);
+  g.rotate(rot);
+  const w=img.width*baseS*sx, h=img.height*baseS*sy;
+  g.imageSmoothingQuality='high';
+  g.drawImage(img, -w/2, -h, w, h);
+
+  // ④ 瞬き：目領域にまぶた（肌色の楕円）をt周期で被せる
+  if (blink.checked){
+    const cyc = (t*0.9)%4.0;                 // 約4.4秒に1回
+    let c=0; if (cyc<0.12) c=cyc/0.12; else if (cyc<0.24) c=1-(cyc-0.12)/0.12; // 開→閉→開
+    if (c>0.02){
+      const sc = baseS; // 目はbaseSのみ（squashは弱いので無視で十分自然）
+      const ex=(EYE.x-img.width/2)*sc*sx, ey=(EYE.y-img.height)*sc*sy;
+      const ew=EYE.w*sc*sx, eh=EYE.h*sc*sy;
+      g.save();
+      g.fillStyle='#814f24';
+      g.beginPath();
+      g.ellipse(ex+ew/2, ey+eh*0.5, ew/2, (eh/2)*c, 0, 0, 7); // 上から閉じる
+      g.fill();
+      g.restore();
+    }
+  }
+  g.restore();
+}
+
+let t0=null;
+function loop(ts){
+  if(t0===null)t0=ts; const t=(ts-t0)/1000;
+  if(img.complete && img.naturalWidth){ drawStatic(ga,ca); drawAlive(gb,cb,t); }
+  requestAnimationFrame(loop);
+}
+img.onload = ()=>requestAnimationFrame(loop);
+if(img.complete) requestAnimationFrame(loop);
+</script>
