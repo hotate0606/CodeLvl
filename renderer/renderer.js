@@ -599,6 +599,16 @@ function renderEvolution(now, p) {
 }
 
 // 現在のキャラ（ベビー/進化後）を vctx に描く。alpha でフェードイン可。
+// 現ステージの待機静止画（[0]=ベビー [1]=進化 [2]=最終進化止め絵）。
+// 未ロードのステージは手前のコマへフォールバックする。
+function idleStill(pal) {
+  const frames = dotFrames.gecko.idle[pal];
+  if (!frames) return dotFrames.gecko.idle.gold[0] || null;
+  let idx = Math.min(evolutionStage, frames.length - 1);
+  while (idx > 0 && !frames[idx]) idx--;
+  return frames[idx] || dotFrames.gecko.idle.gold[0] || null;
+}
+
 function drawCreatureSprite(now, alpha = 1) {
   const pal   = currentPaletteName();
   const st    = activeStages()[Math.min(evolutionStage, activeStages().length - 1)];
@@ -620,99 +630,29 @@ function drawCreatureSprite(now, alpha = 1) {
     // bbox幅基準だとあくびの瞬間に一瞬大きくなる。そこで「体の面積」が待機表示と
     // 一致するスケールに補正する。待機基準がないステージはbbox幅基準にフォールバック。
     dotImg = yset.img;
+    // あくびの表示サイズは、待機で出している静止画(idleStill)と体の面積が一致する
+    // スケールに合わせる（待機⇔あくびでサイズがブレないように）。
     let scale = baseW / yset.refW;
-    const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
-    if (ia && ia.frames.length && ia.refW) {
-      const si = baseW / ia.refW; // 待機アニメの表示スケール
-      scale = si * Math.sqrt(canvasArea(ia.frames[0]) / canvasArea(yset.set.frames[0]));
-    } else if (stage === 0) {
-      const idleImg = dotFrames.gecko.idle[pal] && dotFrames.gecko.idle[pal][0];
-      if (idleImg) {
-        const si = baseW / idleImg.width; // 静止idleの表示スケール
-        scale = si * Math.sqrt(canvasArea(idleImg) / canvasArea(yset.set.frames[0]));
-      }
-    } // stage 1 は待機＝あくびコマ0（同一シート）なので補正不要
+    const idleImg = idleStill(pal);
+    if (idleImg) {
+      const si = baseW / idleImg.width; // 静止idleの表示スケール
+      scale = si * Math.sqrt(canvasArea(idleImg) / canvasArea(yset.set.frames[0]));
+    }
     dW = dotImg.width * scale; dH = dotImg.height * scale;
     anchorX = dW / 2;   // キャンバス中心 = 体の中心X
     anchorY = dH;       // キャンバス下端 = 足元Y
     shadowW = baseW;    // 影は体幅基準で固定（口開け・尻尾で広がらない）
   } else {
-    // 待機表示の優先順位：
-    //   1) 待機アニメシート（最終進化）… ゆったりループ再生
-    //   2) あくびシートのコマ0（進化以降）… モーションと柄・色が完全一致する
-    //   3) 静止idle画像（ベビー、またはシート未ロード時のフォールバック）
-    const ia = dotFrames.gecko.idleAnim[stage] && dotFrames.gecko.idleAnim[stage][pal];
-    const ys = stage >= 1 ? yawnSetFor(stage, pal) : null;
-    // 最終進化の止め絵（紫背景を抜いた1枚絵 idle[pal][2]）があれば最優先で使う。
-    // 体は1枚絵で固定し、動きは手続きアニメ（呼吸 squash&stretch・上下バウンス・左右スウェイ）で出す。
-    const idle2 = stage === 2 && dotFrames.gecko.idle[pal] && dotFrames.gecko.idle[pal][2];
-    if (idle2) {
-      dotImg = idle2;
-      const br = Math.sin(now * 1.6);
-      procSY   = 1 + 0.045 * br;
-      procSX   = 1 - 0.022 * br;
-      procBobY = Math.sin(now * 1.6 + 0.6) * 2;
-      procRot  = Math.sin(now * 0.85) * 0.04;
-      const scale = baseW / dotImg.width; // native：体の全幅(翼・尾含む)を baseW にマップ
-      dW = dotImg.width * scale; dH = dotImg.height * scale;
-      anchorX = dW / 2; anchorY = dH;
-      shadowW = baseW;
-    } else if (ia && ia.frames.length && ia.refW) {
-      if (stage === 2 && pal === 'gold') {
-        // 【①手続きアニメ 試作：ゴールド最終進化】
-        // 体は止め絵（瞬きシートの目状態だけ差し替え）。動きはCanvas変形で出す。
-        //   呼吸：squash & stretch（足元固定で体高が伸び縮み）
-        //   バウンス：呼吸と位相差をつけた上下ゆれ
-        //   スウェイ：足元支点のごく浅い左右回転
-        //   瞬き：基本コマ0(開)。周期的に 半→閉→半 を素早く差し替え
-        const BLINK_PERIOD = 4.4, BLINK_DUR = 0.34; // 瞬き間隔・所要時間（秒）
-        const bt = now % BLINK_PERIOD;
-        let fi = 0;
-        if (bt < BLINK_DUR && ia.frames.length >= 4) {
-          const seq = [1, 2, 3]; // 半→閉→半
-          fi = seq[Math.min(seq.length - 1, Math.floor(bt / BLINK_DUR * seq.length))];
-        }
-        dotImg = ia.frames[fi];
-        const br = Math.sin(now * 1.6);          // 呼吸の位相（周期≒3.9秒）
-        procSY   = 1 + 0.045 * br;               // 縦に伸び縮み
-        procSX   = 1 - 0.022 * br;               // 横は逆位相で体積感を保つ
-        procBobY = Math.sin(now * 1.6 + 0.6) * 2; // 上下バウンス（view px）
-        procRot  = Math.sin(now * 0.85) * 0.04;   // 左右スウェイ（rad）
-      } else {
-      // 1サイクル（呼吸＋瞬き）を再生したら、コマ0（目開き）で IDLE_REST 秒静止してから
-      // 次のサイクルへ。これで瞬きの間隔が空き、自然な見え方になる（瞬き回数を減らす）。
-      const IDLE_ANIM_FPS = 6;  // コマ送りの速さ
-      const IDLE_REST     = 3.5; // サイクル後の静止秒数（瞬き間隔の調整つまみ。大きいほど瞬きが減る）
-      const playDur = ia.frames.length / IDLE_ANIM_FPS; // 1サイクルの再生時間
-      const t = now % (playDur + IDLE_REST);
-      const fi = t < playDur ? Math.floor(t * IDLE_ANIM_FPS) : 0; // 再生中はコマ送り／静止中はコマ0
-      dotImg = ia.frames[fi];
-      }
-      const scale = baseW / ia.refW;
-      dW = dotImg.width * scale; dH = dotImg.height * scale;
-      anchorX = dW / 2; anchorY = dH;
-      shadowW = baseW;
-    } else if (ys && ys.frames.length && ys.refW) {
-      dotImg = ys.frames[0];
-      const scale = baseW / ys.refW;
-      dW = dotImg.width * scale; dH = dotImg.height * scale;
-      anchorX = dW / 2; anchorY = dH;
-      shadowW = baseW;
-    } else {
-      const frames = dotFrames.gecko.idle[pal];
-      let idx = 0;
-      if (frames) {
-        idx = Math.min(evolutionStage, frames.length - 1);
-        while (idx > 0 && !frames[idx]) idx--;
-      }
-      dotImg = (frames && frames[idx]) || dotFrames.gecko.idle.gold[0];
-      if (!dotImg) return;
-      const scale = baseW / dotImg.width;
-      dW = dotImg.width * scale; dH = dotImg.height * scale;
-      anchorX = dW / 2;  // 体の中心X
-      anchorY = dH;      // 足元Y（画像の下端）
-      shadowW = dW;
-    }
+    // 待機モーションは廃止：待機中は常に静止画(idleStill)を1枚絵で表示する。
+    // 待機アニメ(idleAnim)のループ再生も、呼吸squash&stretch・上下バウンス・
+    // 左右スウェイ・瞬きの手続きアニメも行わない（procSX/SY/Bob/Rot は無変形のまま）。
+    dotImg = idleStill(pal);
+    if (!dotImg) return;
+    const scale = baseW / dotImg.width;
+    dW = dotImg.width * scale; dH = dotImg.height * scale;
+    anchorX = dW / 2;  // 体の中心X
+    anchorY = dH;      // 足元Y（画像の下端）
+    shadowW = dW;
   }
 
   // 影
